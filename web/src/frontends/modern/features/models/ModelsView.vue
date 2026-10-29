@@ -1,0 +1,496 @@
+<script setup lang="ts">
+import { useMobileLayout } from '@modern/app/use-mobile-layout'
+import { SlidersHorizontal } from '@lucide/vue'
+import { Boxes, ListOrdered, PencilLine, RefreshCw, Search } from '@lucide/vue'
+import { keepPreviousData, useIsFetching, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { computed, onScopeDispose, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import {
+  getModels,
+  modelContextKey,
+  modelPricingMethods,
+  modelsKey,
+  syncModelPrices,
+  type ModelFilters,
+  type RequestModel,
+} from '@modern/api/models'
+import { useApiClient } from '@shared/http/client-context'
+import { useAuthSession } from '@modern/features/auth/auth-session'
+import { useMessages, useMessageSource } from '@modern/app/messages'
+import { usePageRefresh } from '@modern/app/page-refresh'
+import { useURLState } from '@modern/app/url-state'
+import { useLoadingActivity } from '@modern/components/ui/loading'
+import {
+  AppButton,
+  AppFilterSheet,
+  AppIconButton,
+  AppCollectionState,
+  AppFilterSummary,
+  AppListFrame,
+  AppPagination,
+  AppSegmentedControl,
+  AppSelect,
+  AppTextField,
+} from '@modern/components/ui'
+import { modelStateKeys, parseModelsState, serializeModelsState } from './models-state'
+import ModelCard from './ModelCard.vue'
+import ClientModelCatalogDialog from './ClientModelCatalogDialog.vue'
+import ModelDetailPanel from './ModelDetailPanel.vue'
+import ModelPriceSetupDialog from './ModelPriceSetupDialog.vue'
+
+const { t } = useI18n()
+const isMobile = useMobileLayout()
+const mobileFilterCount = computed(
+  () => (state.value.groups === 'all' ? 1 : 0) + (state.value.method !== 'all' ? 1 : 0),
+)
+const mobileFilters = ref(false)
+function openCatalog(): void {
+  mobileFilters.value = false
+  catalogOpen.value = true
+}
+const client = useApiClient()
+const cache = useQueryClient()
+const session = useAuthSession()
+const admin = computed(() => session.state.principalType === 'admin')
+const state = useURLState(modelStateKeys, parseModelsState, serializeModelsState)
+const filters = computed<ModelFilters>(() => ({
+  q: state.value.q,
+  groups: admin.value ? state.value.groups : 'enabled',
+  pricing: admin.value ? state.value.pricing : 'all',
+  method: admin.value ? state.value.method : 'all',
+  page: state.value.page,
+  pageSize: state.value.pageSize,
+}))
+const query = useQuery(
+  computed(() => ({
+    queryKey: [...modelsKey, 'collection', filters.value],
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      getModels(client, { ...filters.value }, signal),
+    placeholderData: keepPreviousData,
+  })),
+)
+const data = computed(() => query.data.value)
+const search = ref(state.value.q)
+const catalogOpen = ref(false)
+const priceSetupOpen = ref(false)
+function openPriceSetup(): void {
+  mobileFilters.value = false
+  priceSetupOpen.value = true
+}
+function inspectPrice(model: string, source: number): void {
+  state.value = { ...state.value, model, source, groups: 'all' }
+}
+async function pricesSaved(): Promise<void> {
+  priceSetupOpen.value = false
+  await changed()
+}
+const composing = ref(false)
+let timer: ReturnType<typeof setTimeout> | undefined
+const frame = ref<InstanceType<typeof AppListFrame>>()
+const syncing = ref(false)
+const messages = useMessages()
+const controller = new AbortController()
+const fetching = useIsFetching({ queryKey: modelsKey })
+const pending = computed(() => Boolean(fetching.value) || syncing.value)
+useLoadingActivity(() => query.isFetching.value || syncing.value)
+const groupOptions = computed(() => [
+  { value: 'enabled', label: t('modelManager.enabledGroups') },
+  { value: 'all', label: t('modelManager.allGroups') },
+])
+const pricingMethodOptions = computed(() =>
+  modelPricingMethods.map((value) => ({
+    value,
+    label: t(
+      value === 'all' ? 'modelManager.allPricingMethods' : 'modelManager.priceMethods.' + value,
+    ),
+  })),
+)
+function setPricingMethod(value: string): void {
+  change({ method: modelPricingMethods.find((method) => method === value) ?? 'all' })
+}
+const pricingOptions = computed(() => [
+  { value: 'all', label: t('modelManager.allModels') },
+  { value: 'pending', label: t('modelManager.pending') },
+  { value: 'configured', label: t('modelManager.configured') },
+])
+const summary = computed(() => [
+  ...(state.value.q ? [{ key: 'q', label: t('modelManager.search'), value: state.value.q }] : []),
+  ...(admin.value && state.value.groups !== 'enabled'
+    ? [{ key: 'groups', label: t('modelManager.groupStatus'), value: t('modelManager.allGroups') }]
+    : []),
+  ...(admin.value && state.value.method !== 'all'
+    ? [
+        {
+          key: 'method',
+          label: t('modelManager.pricingMethod'),
+          value: t('modelManager.priceMethods.' + state.value.method),
+        },
+      ]
+    : []),
+  ...(admin.value && state.value.pricing !== 'all'
+    ? [
+        {
+          key: 'pricing',
+          label: t('modelManager.pricingStatus'),
+          value: t('modelManager.' + state.value.pricing),
+        },
+      ]
+    : []),
+])
+function change(patch: Partial<ModelFilters>): void {
+  clearTimeout(timer)
+  const q =
+    patch.q ??
+    (composing.value ? state.value.q : Array.from(search.value.trim()).slice(0, 200).join(''))
+  state.value = {
+    ...state.value,
+    ...patch,
+    q,
+    page: q !== state.value.q ? 1 : (patch.page ?? 1),
+  }
+}
+function scheduleSearch(): void {
+  clearTimeout(timer)
+  if (composing.value) return
+  timer = setTimeout(
+    () => change({ q: Array.from(search.value.trim()).slice(0, 200).join('') }),
+    250,
+  )
+}
+function finishComposition(): void {
+  composing.value = false
+  scheduleSearch()
+}
+function applySearch(): void {
+  if (!composing.value) change({ q: Array.from(search.value.trim()).slice(0, 200).join('') })
+}
+function reset(key?: string): void {
+  change({
+    ...(key === undefined || key === 'q' ? { q: '' } : {}),
+    ...(key === undefined || key === 'groups' ? { groups: 'enabled' } : {}),
+    ...(key === undefined || key === 'pricing' ? { pricing: 'all' } : {}),
+    ...(key === undefined || key === 'method' ? { method: 'all' } : {}),
+  })
+}
+function open(model: RequestModel, source = 0): void {
+  if (query.isPlaceholderData.value) return
+  if (filters.value.pricing === 'all' && filters.value.method === 'all')
+    cache.setQueryData(modelContextKey(model.name, filters.value.groups), model)
+  state.value = { ...state.value, model: model.name, source }
+}
+async function refresh(): Promise<void> {
+  await cache.refetchQueries({ queryKey: modelsKey, type: 'active' })
+}
+async function changed(): Promise<void> {
+  await Promise.all([
+    cache.invalidateQueries({ queryKey: modelsKey }),
+    cache.invalidateQueries({ queryKey: ['modern', 'groups'] }),
+    cache.invalidateQueries({ queryKey: ['modern', 'group-models'] }),
+  ])
+}
+async function sync(): Promise<void> {
+  if (!admin.value || syncing.value) return
+  syncing.value = true
+  try {
+    await syncModelPrices(client, controller.signal)
+    if (controller.signal.aborted) return
+    await changed()
+    if (!controller.signal.aborted)
+      messages.show({ tone: 'success', text: t('modelManager.syncSuccess') })
+  } catch {
+    if (!controller.signal.aborted)
+      messages.show({ tone: 'danger', text: t('modelManager.syncFailed') })
+  } finally {
+    syncing.value = false
+  }
+}
+watch(
+  () => state.value.q,
+  (value) => {
+    clearTimeout(timer)
+    search.value = value
+  },
+)
+watch(
+  () => JSON.stringify(filters.value),
+  () => {
+    frame.value?.scrollToTop()
+  },
+)
+watch([data, () => query.isPlaceholderData.value], ([result, placeholder]) => {
+  if (!result || placeholder) return
+  const page = Math.max(1, Math.min(state.value.page, result.pages))
+  if (page !== state.value.page) state.value = { ...state.value, page }
+})
+watch(
+  admin,
+  (value) => {
+    if (
+      !value &&
+      (state.value.groups !== 'enabled' ||
+        state.value.pricing !== 'all' ||
+        state.value.method !== 'all')
+    )
+      state.value = { ...state.value, groups: 'enabled', pricing: 'all', method: 'all' }
+  },
+  { immediate: true },
+)
+onScopeDispose(() => {
+  clearTimeout(timer)
+  controller.abort()
+})
+usePageRefresh({
+  refresh,
+  pending,
+  updatedAt: computed(() => query.dataUpdatedAt.value || undefined),
+})
+useMessageSource(() =>
+  query.isError.value && data.value
+    ? { tone: 'warning', text: t('modelManager.stale') }
+    : undefined,
+)
+</script>
+
+<template>
+  <div class="modern-models-workspace">
+    <form
+      class="modern-models-toolbar"
+      role="search"
+      :aria-label="t('modelManager.search')"
+      @submit.prevent="applySearch"
+    >
+      <AppTextField
+        v-model="search"
+        :label="t('modelManager.search')"
+        :placeholder="
+          t(admin ? 'modelManager.searchPlaceholder' : 'modelManager.readOnlySearchPlaceholder')
+        "
+        :icon="Search"
+        type="search"
+        label-hidden
+        class="modern-models-search"
+        @input="scheduleSearch"
+        @compositionstart="composing = true"
+        @compositionend="finishComposition"
+      />
+      <AppIconButton
+        v-if="isMobile && admin"
+        :icon="SlidersHorizontal"
+        :variant="isMobile && mobileFilterCount ? 'brand' : 'ghost'"
+        :label="t('ui.mobile.filters')"
+        @click="mobileFilters = true"
+      />
+      <AppFilterSheet
+        v-model:open="mobileFilters"
+        :mobile="isMobile"
+        :title="t('ui.mobile.filters')"
+        :active-count="mobileFilterCount"
+        @reset="change({ groups: 'enabled', method: 'all' })"
+      >
+        <AppSelect
+          v-if="admin"
+          :model-value="state.groups"
+          :options="groupOptions"
+          :label="t('modelManager.groupStatus')"
+          :label-hidden="!isMobile"
+          class="modern-models-filter"
+          @update:model-value="change({ groups: $event === 'all' ? 'all' : 'enabled' })"
+        />
+        <AppSelect
+          v-if="admin"
+          :model-value="state.method"
+          :options="pricingMethodOptions"
+          :label="t('modelManager.pricingMethod')"
+          :label-hidden="!isMobile"
+          class="modern-models-filter"
+          @update:model-value="setPricingMethod"
+        />
+        <AppButton v-if="admin" :icon="ListOrdered" @click="openCatalog">{{
+          t('modelManager.clientCatalog.title')
+        }}</AppButton>
+        <AppButton v-if="admin" :icon="RefreshCw" :loading="syncing" @click="sync">{{
+          t('modelManager.sync')
+        }}</AppButton>
+        <AppButton v-if="admin" :icon="PencilLine" @click="openPriceSetup">{{
+          t('modelManager.reuse.bulk')
+        }}</AppButton>
+      </AppFilterSheet>
+    </form>
+    <div class="modern-models-statusbar">
+      <AppSegmentedControl
+        v-if="admin"
+        :model-value="state.pricing"
+        :options="pricingOptions"
+        :label="t('modelManager.pricingStatus')"
+        @update:model-value="
+          change({ pricing: $event === 'pending' || $event === 'configured' ? $event : 'all' })
+        "
+      />
+      <p v-else class="modern-models-price-help">{{ t('modelManager.readOnlyPriceHelp') }}</p>
+      <AppFilterSummary :items="summary" @remove="reset" @reset="reset()" />
+    </div>
+    <AppListFrame
+      ref="frame"
+      mobile-flow
+      :label="t('pages.models.title')"
+      :loading="Boolean(data) && query.isFetching.value"
+    >
+      <AppCollectionState
+        v-if="!data && query.isPending.value"
+        :title="t('modelManager.loading')"
+        loading
+      />
+      <AppCollectionState v-else-if="!data" :title="t('modelManager.failed')" error>
+        <AppButton @click="refresh">{{ t('ui.retry') }}</AppButton>
+      </AppCollectionState>
+      <AppCollectionState
+        v-else-if="!data.items.length"
+        :icon="summary.length ? Search : Boxes"
+        :title="t(summary.length ? 'modelManager.noMatches' : 'modelManager.empty')"
+        :description="
+          t(
+            summary.length
+              ? 'modelManager.noMatchesHelp'
+              : admin
+                ? 'modelManager.emptyHelp'
+                : 'modelManager.readOnlyEmptyHelp',
+          )
+        "
+      >
+        <AppButton v-if="summary.length" @click="reset()">{{ t('collection.reset') }}</AppButton>
+      </AppCollectionState>
+      <div v-else class="modern-models-grid" :class="{ 'is-read-only': !admin }">
+        <ModelCard
+          v-for="model in data.items"
+          :key="model.name"
+          :model="model"
+          :mobile="isMobile"
+          :admin="admin"
+          :selected="model.name === state.model"
+          :disabled="query.isPlaceholderData.value"
+          @open="open(model, $event)"
+        />
+      </div>
+      <template #footer>
+        <AppPagination
+          mode="total"
+          :page="state.page"
+          :page-size="state.pageSize"
+          :total="data?.total"
+          :pending="query.isFetching.value || syncing"
+          @update:page="change({ page: $event })"
+          @update:page-size="change({ pageSize: $event })"
+        />
+      </template>
+    </AppListFrame>
+    <ModelDetailPanel
+      v-if="state.model"
+      :key="state.model"
+      :model="state.model"
+      :source="state.source"
+      :groups="filters.groups"
+      :admin="admin"
+      @inspect="inspectPrice"
+      @close="state = { ...state, model: '', source: 0 }"
+      @select="state = { ...state, source: $event }"
+      @changed="changed"
+    />
+    <ClientModelCatalogDialog v-if="admin && catalogOpen" @close="catalogOpen = false" />
+    <ModelPriceSetupDialog
+      v-if="admin && priceSetupOpen"
+      @close="priceSetupOpen = false"
+      @saved="pricesSaved"
+    />
+  </div>
+</template>
+
+<style scoped>
+.modern-models-workspace {
+  --modern-list-header-background: var(--modern-canvas);
+  container: modern-models-workspace / inline-size;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+.modern-models-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--modern-page-toolbar-gap);
+  padding: var(--modern-page-toolbar-top) 0 var(--modern-page-toolbar-bottom);
+}
+.modern-models-search {
+  flex: 2 1 280px;
+  min-width: 0;
+}
+.modern-models-filter {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.modern-models-statusbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--modern-page-statusbar-gap);
+  padding-bottom: var(--modern-page-statusbar-bottom);
+  color: var(--modern-muted);
+  font-size: var(--modern-font-size-secondary);
+}
+.modern-models-price-help {
+  margin: 0;
+}
+/* 卡片改为价格表头 + 来源行的宽卡布局，需要足够宽度让 4 个价格列不挤压来源名。
+   用多列而不是网格：来源数不同导致卡高不一，网格会按行内最高的卡留出空洞。 */
+.modern-models-grid {
+  column-width: 620px;
+  column-gap: var(--modern-space-4);
+  padding-block: var(--modern-space-1) var(--modern-space-4);
+}
+.modern-models-grid.is-read-only {
+  column-width: 520px;
+}
+.modern-models-grid > * {
+  margin-bottom: var(--modern-space-4);
+  break-inside: avoid;
+}
+/* 放不下两张宽表卡片时，使用两列紧凑卡片，避免单卡被拉成整行。 */
+@container modern-models-workspace (max-width: 1256px) {
+  .modern-models-grid,
+  .modern-models-grid.is-read-only {
+    column-width: 320px;
+    column-count: 2;
+  }
+}
+@media (max-width: 760px) {
+  .modern-models-workspace {
+    flex: none;
+  }
+  .modern-models-search {
+    flex-basis: 100%;
+  }
+  .modern-models-filter {
+    flex-basis: 120px;
+  }
+}
+@media (max-width: 760px) {
+  .modern-models-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .modern-models-grid,
+  .modern-models-grid.is-read-only {
+    display: block;
+    column-width: auto;
+    column-count: 1;
+    padding-block: 0;
+  }
+  .modern-models-grid > * {
+    margin-bottom: 0;
+  }
+}
+</style>

@@ -1,0 +1,334 @@
+import { computed, ref, watch } from 'vue'
+import type { LogEntry } from '@modern/api/logs'
+import { logCanMergeError } from './log-display'
+
+export const logColumnIds = [
+  'completed_at_ms',
+  'request_id',
+  'client_ip',
+  'client_model',
+  'protocol',
+  'operation',
+  'group',
+  'channel',
+  'credential_name',
+  'access_key',
+  'status',
+  'status_code',
+  'stream',
+  'attempt_count',
+  'first_response_ms',
+  'duration_ms',
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'estimated_cost_nano_usd',
+  'upstream_model',
+  'upstream_reported_model',
+  'model_consistency',
+  'upstream_protocol',
+  'route_mode',
+  'affinity_hit',
+  'reasoning_mode',
+  'cache_hit_rate',
+  'cache_write_tokens',
+  'cache_write_5m_tokens',
+  'cache_write_1h_tokens',
+  'cache_write_unknown_tokens',
+  'total_tokens',
+  'usage_state',
+  'cost_state',
+  'pricing_completeness',
+  'pricing_mode',
+  'context_threshold_tokens',
+  'error_code',
+  'error_summary',
+] as const
+export type LogColumnId = (typeof logColumnIds)[number]
+export type LogColumnSection =
+  'request' | 'models' | 'routing' | 'result' | 'performance' | 'tokens' | 'billing'
+export interface LogColumn {
+  id: LogColumnId
+  width: number
+  section: LogColumnSection
+  defaultVisible: boolean
+  admin: boolean
+  grow: number
+}
+// 表格列：计价信息合并进费用；细分缓存写入与完整性状态只在详情面板展示。
+// 协议列在转换时已并列展示上游协议，路由方式默认不再单独占列。
+// 结果紧跟时间，窄屏横向滚动时也能先看到成败。
+// 宽度按与语言无关的最长内容设定：时间、HTTP、百万级 Token、数百秒耗时和费用都是固定格式；
+// 名称类列保留伸缩。表头与结果徽标随界面语言变长，由页面按当前语言的文字补足。
+const definitions: readonly [LogColumnId, number, LogColumnSection, boolean, boolean?, number?][] =
+  [
+    ['completed_at_ms', 64, 'request', true],
+    ['status', 56, 'result', true],
+    ['status_code', 56, 'result', true],
+    ['group', 120, 'routing', true, true, 1],
+    ['channel', 104, 'routing', true, true],
+    ['credential_name', 132, 'routing', true, true, 1],
+    ['access_key', 108, 'routing', true, true, 1],
+    ['client_model', 140, 'models', true, false, 2],
+    ['protocol', 136, 'request', true],
+    ['reasoning_mode', 64, 'models', true],
+    ['stream', 48, 'request', true],
+    ['duration_ms', 56, 'performance', true],
+    ['first_response_ms', 48, 'performance', true],
+    ['attempt_count', 40, 'result', true, true],
+    ['affinity_hit', 40, 'routing', true, true],
+    ['input_tokens', 66, 'tokens', true],
+    ['output_tokens', 66, 'tokens', true],
+    ['cache_read_tokens', 66, 'tokens', true],
+    ['cache_hit_rate', 40, 'tokens', true],
+    ['estimated_cost_nano_usd', 92, 'billing', true],
+    // 用户额外选择的字段统一追加，不打断默认列和错误摘要区域。
+    ['request_id', 304, 'request', false],
+    ['client_ip', 144, 'request', false],
+    ['operation', 100, 'request', false],
+    ['route_mode', 68, 'routing', false, true],
+    ['upstream_reported_model', 152, 'models', false, true, 1],
+    ['error_code', 132, 'result', false],
+    ['error_summary', 200, 'result', false, false, 2],
+    ['cache_write_tokens', 66, 'tokens', false],
+    ['total_tokens', 66, 'tokens', false],
+  ]
+
+// 保存的列恰好等于某一版旧默认列时视为未自定义，随当前默认列更新。
+const previousDefaultColumns: readonly (readonly LogColumnId[])[] = [
+  [
+    'completed_at_ms',
+    'client_model',
+    'protocol',
+    'group',
+    'channel',
+    'credential_name',
+    'access_key',
+    'status',
+    'status_code',
+    'stream',
+    'attempt_count',
+    'duration_ms',
+    'first_response_ms',
+    'input_tokens',
+    'output_tokens',
+    'estimated_cost_nano_usd',
+  ],
+  [
+    'completed_at_ms',
+    'group',
+    'channel',
+    'credential_name',
+    'access_key',
+    'client_model',
+    'protocol',
+    'reasoning_mode',
+    'stream',
+    'route_mode',
+    'affinity_hit',
+    'duration_ms',
+    'first_response_ms',
+    'status',
+    'status_code',
+    'attempt_count',
+    'input_tokens',
+    'output_tokens',
+    'cache_read_tokens',
+    'cache_hit_rate',
+    'estimated_cost_nano_usd',
+  ],
+]
+// 右对齐并使用等宽数字的字段，便于按位比较。
+export const numericColumns: ReadonlySet<LogColumnId> = new Set([
+  'status_code',
+  'attempt_count',
+  'duration_ms',
+  'first_response_ms',
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'cache_hit_rate',
+  'cache_write_tokens',
+  'total_tokens',
+  'estimated_cost_nano_usd',
+])
+export const logColumns: readonly LogColumn[] = definitions.map(
+  ([id, width, section, defaultVisible, admin, grow]) => ({
+    id,
+    width,
+    section,
+    defaultVisible,
+    admin: Boolean(admin),
+    grow: grow ?? 0,
+  }),
+)
+export function useLogColumns(
+  admin: boolean,
+  minWidth: (fields: readonly LogColumnId[]) => number = () => 0,
+) {
+  const available = logColumns.filter((column) => admin || !column.admin)
+  const defaults = available.filter((column) => column.defaultVisible).map((column) => column.id)
+  const defaultIDs = new Set(defaults)
+  const storageKey = 'gpt-load.modern.logs.columns.' + (admin ? 'admin' : 'access-key')
+  const failed = ref(false)
+  let initial = defaults
+  try {
+    const raw: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? 'null')
+    if (Array.isArray(raw)) {
+      const availableIDs = new Set(available.map((column) => column.id))
+      const saved = raw
+        .map((id) =>
+          id === 'upstream_model' || id === 'model_consistency' || id === 'features'
+            ? 'client_model'
+            : id === 'pricing_mode' || id === 'context_threshold_tokens' || id === 'cost_state'
+              ? 'estimated_cost_nano_usd'
+              : id,
+        )
+        .filter(
+          (id): id is LogColumnId => typeof id === 'string' && availableIDs.has(id as LogColumnId),
+        )
+      const savedPreviousDefaults = previousDefaultColumns.some((columns) => {
+        const previousDefaults = columns.filter((id) => availableIDs.has(id))
+        return (
+          new Set(saved).size === previousDefaults.length &&
+          previousDefaults.every((id) => saved.includes(id))
+        )
+      })
+      if (saved.length && !savedPreviousDefaults)
+        initial = available.filter((column) => saved.includes(column.id)).map((column) => column.id)
+    }
+  } catch {
+    /* 存储不可用时继续使用默认列。 */
+  }
+  const selected = ref<LogColumnId[]>(initial)
+  watch(
+    selected,
+    (value) => {
+      try {
+        const raw = JSON.stringify(value)
+        window.localStorage.setItem(storageKey, raw)
+        failed.value = window.localStorage.getItem(storageKey) !== raw
+      } catch {
+        failed.value = true
+      }
+    },
+    { deep: true },
+  )
+  const visible = computed(() => available.filter((column) => selected.value.includes(column.id)))
+  // 选择仍按字段保存，只有同时可见的相关字段才合并为双行。
+  // 每个字段都归入一组语义相近的搭档，避免非默认列各占一列。
+  // 两边同等重要的配对，第二行不降级为附属信息。
+  const peerPairs: ReadonlySet<string> = new Set([
+    'reasoning_mode-stream',
+    'duration_ms-first_response_ms',
+    'input_tokens-output_tokens',
+    'cache_read_tokens-cache_hit_rate',
+    'cache_write_tokens-total_tokens',
+  ])
+  const pairs: readonly (readonly [LogColumnId, LogColumnId, number])[] = [
+    ['reasoning_mode', 'stream', 56],
+    ['group', 'channel', 136],
+    ['access_key', 'credential_name', 112],
+    ['attempt_count', 'affinity_hit', 40],
+    ['status', 'status_code', 56],
+    ['error_code', 'error_summary', 200],
+    ['duration_ms', 'first_response_ms', 100],
+    ['input_tokens', 'output_tokens', 66],
+    ['cache_read_tokens', 'cache_hit_rate', 66],
+    ['cache_write_tokens', 'total_tokens', 66],
+  ]
+  const cells = computed(() => {
+    const consumed = new Set<LogColumnId>()
+    return visible.value.flatMap((column) => {
+      if (consumed.has(column.id)) return []
+      const pair = pairs.find(
+        ([first, second]) =>
+          (first === column.id || second === column.id) &&
+          defaultIDs.has(first) === defaultIDs.has(second) &&
+          selected.value.includes(first) &&
+          selected.value.includes(second),
+      )
+      const fields = pair ? [pair[0], pair[1]] : [column.id]
+      fields.forEach((id) => consumed.add(id))
+      return [
+        {
+          id: fields.join('-'),
+          fields,
+          width: pair?.[2] ?? column.width,
+          grow: column.grow,
+          numeric: numericColumns.has(fields[0]),
+          peer: peerPairs.has(fields.join('-')),
+        },
+      ]
+    })
+  })
+  const errorStart = computed(() => {
+    // 已单独展示错误时不再重复；隐藏列不参与占位和合并。
+    if (selected.value.includes('error_code') || selected.value.includes('error_summary')) return -1
+    const groups: readonly (readonly LogColumnId[])[] = [
+      ['input_tokens', 'output_tokens'],
+      ['cache_read_tokens', 'cache_hit_rate'],
+      ['estimated_cost_nano_usd'],
+    ]
+    return cells.value.findIndex((_, start) =>
+      groups.every((fields, offset) => {
+        const cell = cells.value[start + offset]
+        return cell !== undefined && cell.fields.every((field) => fields.includes(field))
+      }),
+    )
+  })
+  function forRow(row: LogEntry) {
+    const start = errorStart.value >= 0 && logCanMergeError(row) ? errorStart.value : -1
+    return cells.value.flatMap((cell, index) => {
+      if (start >= 0 && index > start && index < start + 3) return []
+      const error = index === start
+      return [
+        {
+          ...cell,
+          id: error ? 'error-summary' : cell.id,
+          numeric: error ? false : cell.numeric,
+          index,
+          span: error ? 3 : 1,
+          error,
+        },
+      ]
+    })
+  }
+  const style = computed(() => {
+    const fallback = cells.value.some((cell) => cell.grow) ? undefined : cells.value[0]?.id
+    const widths = cells.value.map((cell) => Math.max(cell.width, minWidth(cell.fields)))
+    return {
+      '--modern-log-columns': [
+        ...cells.value.map((cell, index) =>
+          cell.grow || cell.id === fallback
+            ? `minmax(${widths[index]}px, ${cell.grow || 1}fr)`
+            : `${widths[index]}px`,
+        ),
+        'var(--modern-log-action-width)',
+      ].join(' '),
+      '--modern-log-width': `calc(${widths.reduce((total, width) => total + width + 12, 12)}px + var(--modern-log-action-width))`,
+    }
+  })
+  function toggle(id: LogColumnId, checked: boolean): void {
+    if (!checked && selected.value.length <= 1) return
+    selected.value = available
+      .filter((column) => (column.id === id ? checked : selected.value.includes(column.id)))
+      .map((column) => column.id)
+  }
+  return {
+    available,
+    visible,
+    cells,
+    forRow,
+    selected,
+    style,
+    failed,
+    toggle,
+    reset: () => {
+      selected.value = [...defaults]
+    },
+    showAll: () => {
+      selected.value = available.map((column) => column.id)
+    },
+  }
+}

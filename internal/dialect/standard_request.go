@@ -1,0 +1,93 @@
+package dialect
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+
+	"gpt-load/internal/protocol"
+)
+
+// InspectStandardRequest 使用路由检查简化表单约定的无状态请求结构推导路由元数据。
+func InspectStandardRequest(
+	clientProtocol protocol.Protocol,
+	model string,
+) (RequestMetadata, error) {
+	selected, request, err := standardRequest(clientProtocol, model)
+	if err != nil {
+		return RequestMetadata{}, err
+	}
+	return selected.InspectRequest(request)
+}
+
+func standardRequest(
+	clientProtocol protocol.Protocol,
+	model string,
+) (Dialect, *ParsedRequest, error) {
+	request := &ParsedRequest{Method: http.MethodPost}
+	var selected Dialect
+	var body any
+	switch clientProtocol {
+	case protocol.OpenAICompletions:
+		selected = NewOpenAI()
+		request.Path = "/v1/chat/completions"
+		body = map[string]any{"model": model, "messages": []any{}}
+	case protocol.OpenAIResponses:
+		selected = NewOpenAIResponses()
+		request.Path = "/v1/responses"
+		body = map[string]any{"model": model, "input": []any{}, "store": false}
+	case protocol.OpenAIImages:
+		selected = NewOpenAIImages()
+		request.Path = openAIImagesGenerationsPath
+		body = map[string]any{"model": model, "prompt": ""}
+	case protocol.OpenAIEmbeddings:
+		selected = NewOpenAIEmbeddings()
+		request.Path = openAIEmbeddingsPath
+		body = map[string]any{"model": model, "input": ""}
+	case protocol.Rerank:
+		selected = NewRerank()
+		request.Path = rerankPath
+		body = map[string]any{"model": model, "query": "ping", "documents": []string{"ping"}, "top_n": 1}
+	case protocol.AudioSpeech:
+		selected = NewAudioSpeech()
+		request.Path = audioSpeechPath
+		body = map[string]any{"model": model, "input": ""}
+	case protocol.Mistral:
+		selected = NewMistral()
+		request.Path = "/v1/ocr"
+		body = map[string]any{"model": model}
+	case protocol.Decisions:
+		selected = NewDecisions()
+		request.Path = decisionsPath
+		body = map[string]any{
+			"model": model,
+			"state": "ping",
+			"questions": map[string]any{
+				"ready": map[string]any{
+					"type": "noul", "instructions": "Is the service ready?",
+					"criteria": map[string]string{"true": "Ready", "false": "Not ready"},
+				},
+			},
+		}
+	case protocol.Anthropic:
+		selected = NewAnthropic()
+		request.Path = "/v1/messages"
+		body = map[string]any{"model": model, "messages": []any{}}
+	case protocol.Gemini:
+		selected = NewGemini()
+		request.Path = geminiGenerationPrefix + model + geminiGenerateSuffix
+		body = map[string]any{}
+	case protocol.GeminiEmbeddings:
+		selected = NewGeminiEmbeddings()
+		request.Path = geminiGenerationPrefix + model + geminiEmbedContentSuffix
+		body = map[string]any{"content": map[string]any{"parts": []any{}}}
+	default:
+		return nil, nil, fmt.Errorf("unsupported data protocol %q", clientProtocol)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode standard %s request: %w", clientProtocol, err)
+	}
+	request.Body = encoded
+	return selected, request, nil
+}

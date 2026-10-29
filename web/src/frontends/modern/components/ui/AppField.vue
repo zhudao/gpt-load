@@ -1,0 +1,196 @@
+<script setup lang="ts">
+import { layoutAttrs } from './field-attrs'
+import { computed, useId, useSlots } from 'vue'
+import type { FieldProps } from './types'
+import { Info } from '@lucide/vue'
+import AppIcon from './AppIcon.vue'
+import AppTooltip from './AppTooltip.vue'
+
+defineOptions({ inheritAttrs: false })
+const props = defineProps<FieldProps>()
+const slots = useSlots()
+const fallbackId = useId()
+const fieldId = computed(() => props.id ?? fallbackId)
+const labelExtraId = computed(() => `${fieldId.value}-label-extra`)
+const hintId = computed(() => `${fieldId.value}-hint`)
+const descriptionId = computed(() => `${fieldId.value}-description`)
+const errorId = computed(() => `${fieldId.value}-error`)
+const describedBy = computed(
+  () =>
+    [
+      props.describedBy,
+      slots['label-extra'] && labelExtraId.value,
+      props.hint && hintId.value,
+      (props.description || props.descriptionWarning) && descriptionId.value,
+      props.error && errorId.value,
+    ]
+      .filter(Boolean)
+      .join(' ') || undefined,
+)
+</script>
+
+<template>
+  <div
+    v-bind="layoutAttrs($attrs)"
+    class="modern-field"
+    :class="{
+      'is-disabled': disabled,
+      'modern-field--inline': inline,
+      'modern-field--subgrid': inline === 'subgrid',
+    }"
+  >
+    <div v-if="$slots['label-extra'] || (hint && !labelHidden)" class="modern-field-heading">
+      <label :id="`${fieldId}-label`" :for="fieldId" :class="{ 'modern-sr-only': labelHidden }">{{
+        label
+      }}</label>
+      <AppTooltip v-if="hint && !labelHidden" touchable :label="hint">
+        <span
+          class="modern-field-hint modern-help-trigger"
+          tabindex="0"
+          role="img"
+          :aria-label="hint"
+        >
+          <AppIcon :icon="Info" size="xs" />
+        </span>
+      </AppTooltip>
+      <div v-if="$slots['label-extra']" :id="labelExtraId" class="modern-field-label-extra">
+        <slot name="label-extra" />
+      </div>
+    </div>
+    <label
+      v-else
+      :id="`${fieldId}-label`"
+      :for="fieldId"
+      :class="{ 'modern-sr-only': labelHidden }"
+      >{{ label }}</label
+    >
+    <span v-if="hint" :id="hintId" class="modern-sr-only">{{ hint }}</span>
+    <slot v-bind="{ id: fieldId, describedBy, invalid: Boolean(error || invalid) }" />
+    <p
+      v-if="description || descriptionWarning"
+      :id="descriptionId"
+      class="modern-field-description"
+    >
+      {{ description }}
+      <span v-if="descriptionWarning" class="modern-field-warning" aria-live="polite">
+        {{ description ? ' · ' : '' }}{{ descriptionWarning }}
+      </span>
+    </p>
+    <p v-if="error" :id="errorId" class="modern-field-error" role="alert">{{ error }}</p>
+  </div>
+</template>
+
+<style scoped>
+.modern-field {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  gap: var(--modern-space-1-5);
+}
+.modern-field--inline {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0;
+}
+.modern-field--subgrid {
+  grid-template-columns: subgrid;
+}
+.modern-field--subgrid > :slotted(*) {
+  grid-column: 2 / -1;
+}
+.modern-field--inline > label,
+.modern-field--inline .modern-field-heading > label {
+  min-width: 0;
+  text-align: right;
+}
+.modern-field--inline .modern-field-heading {
+  justify-content: flex-end;
+  gap: 0;
+}
+.modern-field--inline .modern-field-heading > label {
+  flex: 1;
+}
+.modern-field--inline .modern-field-hint {
+  margin-inline-start: var(--modern-space-1-5);
+}
+.modern-field--inline .modern-field-label-extra {
+  flex: none;
+  min-width: var(--modern-control-xxs);
+  min-height: var(--modern-control-xxs);
+  justify-content: center;
+  gap: 0;
+}
+.modern-field--inline .modern-field-description,
+.modern-field--inline .modern-field-error {
+  grid-column: 2 / -1;
+}
+.modern-field label {
+  color: var(--modern-text);
+  font-size: var(--modern-font-size-secondary);
+  font-weight: var(--modern-weight-medium);
+  line-height: var(--modern-leading-compact);
+}
+.modern-field-hint {
+  display: inline-flex;
+  flex: none;
+  color: var(--modern-muted);
+  border-radius: var(--modern-radius-control);
+}
+.modern-field-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--modern-space-1-5);
+}
+.modern-field-heading > label {
+  flex-shrink: 0;
+}
+.modern-field-label-extra {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--modern-space-1-5);
+  color: var(--modern-muted);
+  font-size: var(--modern-font-size-small);
+  line-height: var(--modern-leading-compact);
+}
+.modern-field.is-disabled label,
+.modern-field-description {
+  color: var(--modern-muted);
+}
+.modern-field-description,
+.modern-field-error {
+  font-size: var(--modern-font-size-small);
+  line-height: var(--modern-leading-body);
+  overflow-wrap: anywhere;
+}
+.modern-field-error {
+  color: var(--modern-danger);
+}
+.modern-field-warning {
+  color: var(--modern-warning);
+}
+@media (max-width: 760px) {
+  .modern-field--inline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .modern-field--subgrid > :slotted(*),
+  .modern-field--inline .modern-field-description,
+  .modern-field--inline .modern-field-error {
+    grid-column: 1 / -1;
+  }
+  .modern-field--inline > label,
+  .modern-field--inline .modern-field-heading > label {
+    text-align: left;
+  }
+  .modern-field--inline .modern-field-label-extra {
+    min-width: var(--modern-touch-target);
+    min-height: var(--modern-touch-target);
+  }
+  .modern-field--inline .modern-field-label-extra:empty {
+    display: none;
+  }
+}
+</style>

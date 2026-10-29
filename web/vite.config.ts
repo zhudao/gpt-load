@@ -1,35 +1,48 @@
-import vue from "@vitejs/plugin-vue";
-import path from "path";
-import { defineConfig, loadEnv } from "vite";
+import { fileURLToPath, URL } from 'node:url'
 
-// https://vite.dev/config/
-export default defineConfig(({ mode }) => {
-  // 加载环境变量
-  const env = loadEnv(mode, path.resolve(__dirname, "../"), "");
+import tailwindcss from '@tailwindcss/vite'
+import vue from '@vitejs/plugin-vue'
+import { defineConfig } from 'vite'
 
-  return {
-    plugins: [vue()],
-    // 解析配置
-    resolve: {
-      // 配置路径别名
-      alias: {
-        "@": path.resolve(__dirname, "./src"),
-      },
+export const webRootPath = fileURLToPath(new URL('.', import.meta.url))
+export const pageRouteManifestPath = fileURLToPath(
+  new URL('../internal/webui/page_routes.json', import.meta.url),
+)
+export const modernPageRouteManifestPath = fileURLToPath(
+  new URL('../internal/webui/modern_page_routes.json', import.meta.url),
+)
+export const devServerFileSystemAllow = [
+  webRootPath,
+  pageRouteManifestPath,
+  modernPageRouteManifestPath,
+]
+
+const proxyTarget = process.env.VITE_DEV_PROXY_TARGET || 'http://127.0.0.1:3001'
+
+export default defineConfig({
+  root: webRootPath,
+  plugins: [vue(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src/frontends/classic', import.meta.url)),
+      '@modern': fileURLToPath(new URL('./src/frontends/modern', import.meta.url)),
+      '@shared': fileURLToPath(new URL('./src/shared', import.meta.url)),
     },
-    // 开发服务器配置
-    server: {
-      // 代理配置示例
-      proxy: {
-        "/api": {
-          target: env.VITE_API_BASE_URL || "http://127.0.0.1:3001",
-          changeOrigin: true,
-        },
-      },
+  },
+  server: {
+    fs: {
+      allow: devServerFileSystemAllow,
     },
-    // 构建配置
-    build: {
-      outDir: "dist",
-      assetsDir: "assets",
-    },
-  };
-});
+    proxy: Object.fromEntries(
+      ['/api', '/health', '/v1', '/v1beta'].map((path) => [
+        path,
+        { target: proxyTarget, changeOrigin: true },
+      ]),
+    ),
+  },
+  build: {
+    outDir: '../internal/webui/dist',
+    emptyOutDir: true,
+    manifest: true,
+  },
+})

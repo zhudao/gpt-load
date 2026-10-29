@@ -1,0 +1,29 @@
+import type { CreateAccessKeyRequest } from '@/app/resources/access-keys'
+
+export interface PendingAccessKeyCreateOperation {
+  idempotencyKey: string
+  payload: CreateAccessKeyRequest
+  state: 'indeterminate' | 'reconciling'
+}
+
+export function cloneAccessKeyCreatePayload(
+  payload: CreateAccessKeyRequest,
+): CreateAccessKeyRequest {
+  return {
+    ...(payload.key ? { key: payload.key } : {}),
+    name: payload.name,
+    status: payload.status,
+    filters: {
+      groups: [...payload.filters.groups],
+      protocols: [...payload.filters.protocols],
+      models: [...payload.filters.models],
+      allowed_cidrs: [...payload.filters.allowed_cidrs],
+    },
+    expires_at_ms: payload.expires_at_ms,
+    concurrency_limit: payload.concurrency_limit,
+    rpm_limit: payload.rpm_limit,
+    price_multiplier: payload.price_multiplier,
+    record_request_body: payload.record_request_body,
+    cost_limit_rules: payload.cost_limit_rules.map((rule) => ({ ...rule })),
+  }
+}

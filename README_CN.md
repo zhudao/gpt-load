@@ -1,474 +1,294 @@
+<div align="center">
+
+<img src="./web/public/favicon.svg" alt="GPT-Load" width="96">
+
 # GPT-Load
 
-[English](README.md) | 中文文档
+**面向多渠道、多凭据场景的自托管 AI 网关**
 
-[![Release](https://img.shields.io/github/v/release/tbphp/gpt-load)](https://github.com/tbphp/gpt-load/releases)
-![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+把 API Key、订阅账号、流量调度、故障处理、请求日志与用量统计，收进同一个入口。
 
-一个高性能、企业级的 AI 接口透明代理服务，专门为需要集成多种 AI 服务的企业和开发者设计。采用 Go 语言开发，具备智能密钥管理、负载均衡和完善的监控功能，专为高并发生产环境而设计。
+[English](README.md) · 中文 · [日本語](README_JP.md) | [官方网站](https://www.gpt-load.com)
 
-详细请查看[官方文档](https://www.gpt-load.com/docs?lang=zh)
+[![Release](https://img.shields.io/github/v/tag/tbphp/gpt-load?filter=v2.*)](https://github.com/tbphp/gpt-load/releases)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Ftbphp%2Fgpt--load%3A2-2496ED?logo=docker&logoColor=white)](https://github.com/tbphp/gpt-load/pkgs/container/gpt-load)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<a href="https://hellogithub.com/repository/tbphp/gpt-load" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=554dc4c46eb14092b9b0c56f1eb9021c&claim_uid=Qlh8vzrWJ0HCneG" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+<a href="https://trendshift.io/repositories/14880" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14880" alt="tbphp/gpt-load | Trendshift" width="220" height="48"/></a>
+<a href="https://hellogithub.com/repository/tbphp/gpt-load" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=554dc4c46eb14092b9b0c56f1eb9021c&claim_uid=Qlh8vzrWJ0HCneG" alt="Featured｜HelloGitHub" width="220" height="47"/></a>
 
-## 功能特性
+</div>
 
-- **透明代理**: 完全保留原生 API 格式，支持 OpenAI、Google Gemini 和 Anthropic Claude 等多种格式
-- **智能密钥管理**: 高性能密钥池，支持分组管理、自动轮换和故障恢复
-- **负载均衡**: 支持多上游端点的加权负载均衡，提升服务可用性
-- **智能故障处理**: 自动密钥黑名单管理和恢复机制，确保服务连续性
-- **动态配置**: 系统设置和分组配置支持热重载，无需重启即可生效
-- **企业级架构**: 分布式主从部署，支持水平扩展和高可用
-- **现代化管理**: 基于 Vue 3 的 Web 管理界面，直观易用
-- **全面监控**: 实时统计、健康检查、详细请求日志
-- **高性能设计**: 零拷贝流式传输、连接池复用、原子操作
-- **生产就绪**: 优雅关闭、错误恢复、完善的安全机制
-- **双重认证体系**: 管理端与代理端认证分离，代理认证支持全局和分组级别密钥
+---
 
-## 支持的 AI 服务
+## 赞助商
 
-GPT-Load 作为透明代理服务，完整保留各 AI 服务商的原生 API 格式：
+<sub>[成为赞助商](mailto:tangb7420@gmail.com)</sub>
 
-- **OpenAI 格式**: 官方 OpenAI API、Azure OpenAI、以及其他 OpenAI 兼容服务
-- **Google Gemini 格式**: Gemini Pro、Gemini Pro Vision 等模型的原生 API
-- **Anthropic Claude 格式**: Claude 系列模型，支持高质量的对话和文本生成
+<details open>
+<summary>赞助商详情（可折叠）</summary>
+
+<a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=gptload" target="_blank" rel="sponsored noopener noreferrer"><img src="./screenshot/modelflare-banner-zh.png" alt="Modelflare"></a>
+
+感谢 Modelflare 赞助本项目！Modelflare：满血稳定不掺水，低成本享受全球 SOTA 模型。站点由美国 LLC 主体 Havenbyte LLC 运营，支持 GPT、Claude、Gemini、Grok 等主流模型和常用兼容协议，还支持 40 多种图片和视频模型。
+
+**缓存补偿**是一大亮点：部分 OpenAI 价格优先、稳定和高级分组提供每日 65%、75%、85% 的缓存命中率保障，符合条件的请求没达到目标的，平台补偿差额，结算后可在用量看板查看。
+
+**特惠活动**：单笔充值 US&#36;20 即可解锁 0.015 倍价格倍率的 GPT 特惠分组，单笔充值 US&#36;50 即可解锁 0.03 倍价格倍率的 Claude 特惠分组。通过<a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=gptload" target="_blank" rel="sponsored noopener noreferrer">专属链接</a>注册即可参与。
+
+---
+
+<table>
+<tbody>
+<tr>
+<td width="180"><a href="https://ofox.ai/?utm_source=github&amp;utm_medium=sponsorship&amp;utm_content=gpt_load" target="_blank" rel="noopener noreferrer"><img src="./screenshot/ofoxai.svg" alt="OfoxAI" width="150"></a></td>
+<td><strong>OfoxAI：一个平台，连接文本、图像与视频 AI</strong><br>OfoxAI 是统一的 AI API 平台，汇集多家文本、图像和视频模型，支持 OpenAI 兼容接口及 Anthropic、Gemini 原生接口。开发者可通过一个平台为 AI 应用、智能体和内容创作接入模型，按任务选择合适的能力。 <a href="https://ofox.ai/?utm_source=github&amp;utm_medium=sponsorship&amp;utm_content=gpt_load" target="_blank" rel="noopener noreferrer">探索 OfoxAI 模型与 API →</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.packyapi.ai/register?aff=ahiS" target="_blank" rel="sponsored noopener noreferrer"><picture><source media="(prefers-color-scheme: dark)" srcset="./screenshot/packycode-dark.png"><source media="(prefers-color-scheme: light)" srcset="./screenshot/packycode-light.png"><img src="./screenshot/packycode-light.png" alt="PackyCode" width="150"></picture></a></td>
+<td><strong>PackyCode</strong><br>PackyCode 是一家稳定、高效的 API 中转服务商。一句话接入主流大模型。统一域名、统一密钥、智能容灾切换，97% 可用性。人民币1:1充值，无汇率无手续费坑，新用户首充立享折扣 + $1免费体验额度，多分组折扣低至 2 折起，提供专属Codex/Claude Code高速通道。<a href="https://www.packyapi.ai/register?aff=ahiS" target="_blank" rel="sponsored noopener noreferrer">点此链接注册，立即开始使用！</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.axisnow.io/zh"><img src="./screenshot/axisnow.jpg" alt="AxisNow" width="150"></a></td>
+<td>保护并加速网站与 API，<strong>兼顾中国大陆</strong>及全球的访问体验，并通过客户端 SDK，将加速与安全能力延伸至原生/移动 App — <strong>自建私有部署 CDN｜订阅式高防 CDN｜自主可控、灵活组合的 CDN 网络。</strong></td>
+</tr>
+<tr>
+<td width="180"><a href="https://go.apimart.ai/gh-gpt-load"><img src="./screenshot/apimart.png" alt="APIMart" width="150"></a></td>
+<td>感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过<a href="https://go.apimart.ai/gh-gpt-load">此注册链接</a>注册即可开用。</td>
+</tr>
+</tbody>
+</table>
+
+</details>
+
+## 为什么选择 GPT-Load
+
+应用只需要配置一个地址和一个 AccessKey。后面的服务商、账号、凭据、模型与路由策略，全部在管理界面里完成。
+
+<img src="./screenshot/architecture-overview.svg" alt="GPT-Load 统一接入与上游分流架构图" width="860">
+
+- **统一入口，保留原生协议** — 官方 API、云平台、模型服务和兼容中转统一管理；客户端继续使用 OpenAI、Anthropic 或 Gemini 原生接口，无需改造代码。
+- **统一管理 API Key 与订阅账号** — Codex、Claude、Antigravity、Grok 等订阅渠道与 API Key 渠道共享凭据管理、调度和健康体系。
+- **内置调度与故障隔离** — 多凭据调度、可配置权重、重试、冷却、黑名单与会话亲和，降低单个凭据过载或失效的影响。
+- **可观测、易部署、数据自持** — 提供健康、路由、日志、用量与成本估算；单个 Go 二进制内嵌管理界面，支持 SQLite、MySQL、PostgreSQL 和本地凭据加密。
 
 ## 快速开始
 
-### 环境要求
+> [!WARNING]
+> 如果你正在使用 1.x，请先阅读[从 1.x 切换](#从-1x-切换)。2.0 不能打开、导入或原地迁移 1.x 数据。
 
-- Go 1.23+ (源码构建)
-- Docker (容器化部署)
-- MySQL, PostgreSQL, 或 SQLite (数据库存储)
-- Redis (缓存和分布式协调，可选)
+### 1. 启动服务
 
-### 方式一：Docker 快速开始
+需要 Docker 与 Docker Compose。
 
 ```bash
-docker run -d --name gpt-load \
-    -p 3001:3001 \
-    -e AUTH_KEY=your-secure-key-here \
-    -v "$(pwd)/data":/app/data \
-    ghcr.io/tbphp/gpt-load:latest
-```
+git clone --depth 1 https://github.com/tbphp/gpt-load.git
+cd gpt-load
 
-> 请将 `your-secure-key-here` 改为强密码（决不能使用默认值），即可登录管理界面：<http://localhost:3001>
-
-### 方式二：使用 Docker Compose（推荐）
-
-**安装命令：**
-
-```bash
-# 创建目录
-mkdir -p gpt-load && cd gpt-load
-
-# 下载配置文件
-wget https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/.env.example
-
-# 编辑 .env 文件，修改AUTH_KEY为强密码，绝不使用 sk-123456 等默认或者简单密钥
-
-# 启动服务
+cp .env.example .env
 docker compose up -d
 ```
 
-在部署之前，您必须修改默认的管理密钥 (AUTH_KEY)，建议密钥格式：sk-prod-[随机字符串32位]。
-
-默认安装的是 SQLite 版本，适合轻量单机应用。
-
-如需安装 MySQL, PostgreSQL 及 Redis，请在 `docker-compose.yml` 文件中取消所需服务的注释，并配置好对应的环境配置重启即可。
-
-**其他命令：**
+确认服务已启动：
 
 ```bash
-# 查看服务状态
-docker compose ps
-
-# 查看日志
-docker compose logs -f
-
-# 重启服务
-docker compose down && docker compose up -d
-
-# 更新到最新版本
-docker compose pull && docker compose down && docker compose up -d
+curl --fail http://127.0.0.1:3001/health
 ```
 
-部署完成后：
-
-- 访问 Web 管理界面：<http://localhost:3001>
-- API 代理地址：<http://localhost:3001/proxy>
-
-> 使用你修改的 AUTH_KEY 登录管理端。
-
-### 方式三：源码构建
-
-源码构建需要本地已安装数据库（SQLite、MySQL 或 PostgreSQL）和 Redis（可选）。
+首次启动会自动生成管理密钥，读取并妥善保存：
 
 ```bash
-# 克隆并构建
-git clone https://github.com/tbphp/gpt-load.git
-cd gpt-load
-go mod tidy
-
-# 创建配置
-cp .env.example .env
-
-# 编辑 .env 文件，修改AUTH_KEY为强密码，绝不使用 sk-123456 等默认或者简单密钥
-# 修改 .env 中 DATABASE_DSN 和 REDIS_DSN 配置
-# REDIS_DSN 为可选，如果不配置则启用内存存储
-
-# 运行
-make run
+docker compose exec gpt-load sh -c 'cat /app/data/auth.key'
 ```
 
-部署完成后：
+打开 <http://127.0.0.1:3001>，用该密钥登录控制台。
 
-- 访问 Web 管理界面：<http://localhost:3001>
-- API 代理地址：<http://localhost:3001/proxy>
+> 也可以在启动前通过 `.env` 里的 `AUTH_KEY` 显式指定管理密钥。默认只监听本机地址，不会直接暴露到公网。
 
-> 使用你修改的 AUTH_KEY 登录管理端。
+### 2. 完成首次配置
 
-### 方式四：集群部署
+首次配置只需三步：
 
-集群部署需要所有节点都连接同一个 MySQL（或者 PostgreSQL） 和 Redis，并且 Redis 是必须要求。建议使用统一的分布式 MySQL 和 Redis 集群。
-
-**部署要求：**
-
-- 所有节点必须配置相同的 `AUTH_KEY`、`DATABASE_DSN`、`REDIS_DSN`
-- 一主多从架构，从节点必须配置环境变量：`IS_SLAVE=true`
-
-详细请参考[集群部署文档](https://www.gpt-load.com/docs/cluster?lang=zh)
-
-## 配置系统
-
-### 配置架构概述
-
-GPT-Load 采用双层配置架构：
-
-#### 1. 静态配置（环境变量）
-
-- **特点**：应用启动时读取，运行期间不可修改，需重启应用生效
-- **用途**：基础设施配置，如数据库连接、服务器端口、认证密钥等
-- **管理方式**：通过 `.env` 文件或系统环境变量设置
-
-#### 2. 动态配置（热重载）
-
-- **系统设置**：存储在数据库中，为整个应用提供统一的行为基准
-- **分组配置**：为特定分组定制的行为参数，可覆盖系统设置
-- **配置优先级**：分组配置 > 系统设置 > 环境配置
-- **特点**：支持热重载，修改后立即生效，无需重启应用
+1. **添加渠道** — 选择上游服务，填入一个或多个 API Key；订阅渠道按界面提示完成 OAuth 授权或导入凭据。
+2. **创建 Group** — 选择渠道，配置可用模型与运行策略。
+3. **创建 AccessKey** — 设置允许访问的 Group 与客户端协议，把生成的 AccessKey 交给应用使用。
 
 <details>
-<summary>静态配置（环境变量）</summary>
+<summary>订阅渠道的 OAuth 回调端口</summary>
 
-**服务器配置：**
+Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compose 会把它们发布到 `HOST` 配置的地址，默认是 `127.0.0.1`；设置 `HOST=0.0.0.0` 时，这些回调端口也会发布到宿主机的全部网络接口。因为端口由上游客户端固定，同一台机器同一时刻只能运行一个默认 Compose 实例。
 
-| 配置项       | 环境变量                           | 默认值          | 说明                       |
-| ------------ | ---------------------------------- | --------------- | -------------------------- |
-| 服务端口     | `PORT`                             | 3001            | HTTP 服务器监听端口        |
-| 服务地址     | `HOST`                             | 0.0.0.0         | HTTP 服务器绑定地址        |
-| 读取超时     | `SERVER_READ_TIMEOUT`              | 60              | HTTP 服务器读取超时（秒）  |
-| 写入超时     | `SERVER_WRITE_TIMEOUT`             | 600             | HTTP 服务器写入超时（秒）  |
-| 空闲超时     | `SERVER_IDLE_TIMEOUT`              | 120             | HTTP 连接空闲超时（秒）    |
-| 优雅关闭超时 | `SERVER_GRACEFUL_SHUTDOWN_TIMEOUT` | 10              | 服务优雅关闭等待时间（秒） |
-| 从节点模式   | `IS_SLAVE`                         | false           | 集群部署时从节点标识       |
-| 时区         | `TZ`                               | `Asia/Shanghai` | 指定时区                   |
-
-**认证与数据库配置：**
-
-| 配置项     | 环境变量       | 默认值             | 说明                                 |
-| ---------- | -------------- | ------------------ | ------------------------------------ |
-| 管理密钥   | `AUTH_KEY`     | `sk-123456`        | **管理端**的访问认证密钥，请修改为强密码 |
-| 数据库连接 | `DATABASE_DSN` | ./data/gpt-load.db | 数据库连接字符串 (DSN) 或文件路径    |
-| Redis 连接 | `REDIS_DSN`    | -                  | Redis 连接字符串，为空时使用内存存储 |
-
-**性能与跨域配置：**
-
-| 配置项       | 环境变量                  | 默认值                        | 说明                     |
-| ------------ | ------------------------- | ----------------------------- | ------------------------ |
-| 最大并发请求 | `MAX_CONCURRENT_REQUESTS` | 100                           | 系统允许的最大并发请求数 |
-| 启用 CORS    | `ENABLE_CORS`             | true                          | 是否启用跨域资源共享     |
-| 允许的来源   | `ALLOWED_ORIGINS`         | `*`                           | 允许的来源，逗号分隔     |
-| 允许的方法   | `ALLOWED_METHODS`         | `GET,POST,PUT,DELETE,OPTIONS` | 允许的 HTTP 方法         |
-| 允许的头部   | `ALLOWED_HEADERS`         | `*`                           | 允许的请求头，逗号分隔   |
-| 允许凭据     | `ALLOW_CREDENTIALS`       | false                         | 是否允许发送凭据         |
-
-**日志配置：**
-
-| 配置项       | 环境变量          | 默认值                | 说明                               |
-| ------------ | ----------------- | --------------------- | ---------------------------------- |
-| 日志级别     | `LOG_LEVEL`       | `info`                | 日志级别：debug, info, warn, error |
-| 日志格式     | `LOG_FORMAT`      | `text`                | 日志格式：text, json               |
-| 启用文件日志 | `LOG_ENABLE_FILE` | false                 | 是否启用文件日志输出               |
-| 日志文件路径 | `LOG_FILE_PATH`   | `./data/logs/app.log` | 日志文件存储路径                   |
-
-**代理配置：**
-
-GPT-Load 会自动从环境变量中读取代理设置，用于向上游 AI 服务商发起请求。
-
-| 配置项     | 环境变量      | 默认值 | 说明                                     |
-| ---------- | ------------- | ------ | ---------------------------------------- |
-| HTTP 代理  | `HTTP_PROXY`  | -      | 用于 HTTP 请求的代理服务器地址           |
-| HTTPS 代理 | `HTTPS_PROXY` | -      | 用于 HTTPS 请求的代理服务器地址          |
-| 无代理     | `NO_PROXY`    | -      | 不需要通过代理访问的主机或域名，逗号分隔 |
-
-支持的代理协议格式：
-
-- **HTTP**: `http://user:pass@host:port`
-- **HTTPS**: `https://user:pass@host:port`
-- **SOCKS5**: `socks5://user:pass@host:port`
-</details>
-
-<details>
-<summary>动态配置（热重载）</summary>
-
-**基础设置：**
-
-| 配置项       | 字段名                               | 默认值                      | 分组可覆盖 | 说明                                   |
-| ------------ | ------------------------------------ | --------------------------- | ---------- | -------------------------------------- |
-| 项目地址     | `app_url`                            | `http://localhost:3001`     | ❌         | 项目基础 URL                           |
-| 全局代理密钥 | `proxy_keys`                         | 初始值为环境配置的 AUTH_KEY | ❌         | 全局生效的代理认证密钥，多个用逗号分隔 |
-| 日志保留天数 | `request_log_retention_days`         | 7                           | ❌         | 请求日志保留天数，0 为不清理           |
-| 日志写入间隔 | `request_log_write_interval_minutes` | 1                           | ❌         | 日志写入数据库周期（分钟）             |
-| 启用日志详情 | `enable_request_body_logging`        | false                       | ✅         | 是否在请求日志中记录完整的请求体内容，启用会增加内存和存储占用 |
-
-**请求设置：**
-
-| 配置项               | 字段名                    | 默认值 | 分组可覆盖 | 说明                           |
-| -------------------- | ------------------------- | ------ | ---------- | ------------------------------ |
-| 请求超时             | `request_timeout`         | 600    | ✅         | 转发请求完整生命周期超时（秒） |
-| 连接超时             | `connect_timeout`         | 15     | ✅         | 与上游服务建立连接超时（秒）   |
-| 空闲连接超时         | `idle_conn_timeout`       | 120    | ✅         | HTTP 客户端空闲连接超时（秒）  |
-| 响应头超时           | `response_header_timeout` | 600    | ✅         | 等待上游响应头超时（秒）       |
-| 最大空闲连接数       | `max_idle_conns`          | 100    | ✅         | 连接池最大空闲连接总数         |
-| 每主机最大空闲连接数 | `max_idle_conns_per_host` | 50     | ✅         | 每个上游主机最大空闲连接数     |
-| 代理服务器地址       | `proxy_url`               | -      | ✅         | 用于转发请求的 HTTP/HTTPS 代理，为空则使用环境配置 |
-
-**密钥配置：**
-
-| 配置项         | 字段名                            | 默认值 | 分组可覆盖 | 说明                                             |
-| -------------- | --------------------------------- | ------ | ---------- | ------------------------------------------------ |
-| 最大重试次数   | `max_retries`                     | 3      | ✅         | 单个请求使用不同密钥的最大重试次数               |
-| 黑名单阈值     | `blacklist_threshold`             | 3      | ✅         | 密钥连续失败多少次后进入黑名单                   |
-| 密钥验证间隔   | `key_validation_interval_minutes` | 60     | ✅         | 后台定时验证密钥周期（分钟）                     |
-| 密钥验证并发数 | `key_validation_concurrency`      | 10     | ✅         | 后台定时验证无效 Key 时的并发数                  |
-| 密钥验证超时   | `key_validation_timeout_seconds`  | 20     | ✅         | 后台定时验证单个 Key 时的 API 请求超时时间（秒） |
+如果通过 SSH 或远程浏览器操作，浏览器的 `localhost` 可能到不了 GPT-Load —— 此时把完整回调 URL 复制到授权弹窗里即可完成流程。
 
 </details>
 
-## Web 管理界面
+## 界面预览
 
-访问管理控制台：<http://localhost:3001>（默认地址）
+**分组总览** — 统一查看渠道、模型、凭据数量、流量与健康状态
 
-### 界面展示
+<img src="./screenshot/groups-zh-CN.png" alt="GPT-Load 新版分组总览" width="860">
 
-<img src="screenshot/dashboard.png" alt="仪表盘" width="600" />
+**用量统计** — 查看请求趋势、缓存命中率、Token 分类与成本估算
 
-<br/>
+<img src="./screenshot/usage-zh-CN.png" alt="GPT-Load 新版用量统计" width="860">
 
-<img src="screenshot/keys.png" alt="密钥管理" width="600" />
+## 支持范围
 
-<br/>
+### 客户端协议
 
-Web 管理界面提供以下功能：
+| 协议                    | 主要入口                                                           |
+| ----------------------- | ------------------------------------------------------------------ |
+| OpenAI Chat Completions | `POST /v1/chat/completions`                                        |
+| OpenAI Responses        | `/v1/responses` 及其资源路径                                       |
+| OpenAI Images           | `POST /v1/images/...`                                              |
+| OpenAI Embeddings       | `POST /v1/embeddings`                                              |
+| Rerank                  | `POST /v1/rerank`                                                  |
+| Audio Speech            | `POST /v1/audio/speech`                                            |
+| Mistral 原生            | `/v1/ocr`、`/v1/audio/transcriptions` |
+| Anthropic Messages      | `POST /v1/messages`                                                |
+| Gemini                  | `/v1beta/models/...`                                               |
+| Gemini Embeddings       | `POST /v1beta/models/{model}:embedContent` / `:batchEmbedContents` |
 
-- **仪表盘**: 实时统计信息和系统状态概览
-- **密钥管理**: 创建和配置 AI 服务商分组，添加、删除和监控 API 密钥
-- **请求日志**: 详细的请求历史记录和调试信息
-- **系统设置**: 全局配置管理和热重载
+### 内置渠道
 
-## API 使用说明
+- **官方与云平台**：OpenAI、Anthropic、Gemini、xAI、Azure OpenAI、AWS Bedrock、Google Vertex AI
+- **常用模型服务**：DeepSeek、Moonshot AI、SiliconFlow、Zhipu AI、Alibaba、Volcengine、OpenRouter、Cline、Groq、Cerebras、Mistral、Nebius、Parasail、Wafer、Hugging Face（聊天）、Cohere（文本重排序）、OpenCode Go、OpenCode Zen
+- **订阅渠道**：Codex、Claude、Antigravity、Grok
+- **自定义**：OpenAI Compatible（任意兼容中转）
+
+## 部署与数据
+
+Docker Compose 默认使用应用管理的 SQLite，数据存放在 `gpt-load-data` 具名卷中，包含数据库、`auth.key` 和 `encryption.key`。
+
+> [!IMPORTANT]
+> `encryption.key` 用于解密渠道凭据。备份或迁移时，数据库和密钥**必须一起保存**；密钥丢失或被替换后，已有加密凭据无法恢复，且当前版本不支持主密钥轮换。
 
 <details>
-<summary>代理接口调用方式</summary>
+<summary>使用外部数据库</summary>
 
-GPT-Load 通过分组名称路由请求到不同的 AI 服务。使用方式如下：
-
-### 1. 代理端点格式
+通过统一的 `DATABASE_DSN` 连接 SQLite、MySQL 或 PostgreSQL：
 
 ```text
-http://localhost:3001/proxy/{group_name}/{原始API路径}
+mysql://user:password@db.example:3306/gpt_load?charset=utf8mb4&collation=utf8mb4_bin
+postgres://user:password@db.example:5432/gpt_load?sslmode=require
 ```
-
-- `{group_name}`: 在管理界面创建的分组名称
-- `{原始API路径}`: 保持与原始 AI 服务完全一致的路径
-
-### 2. 认证方式
-
-在 Web 管理界面中配置**代理密钥** (`Proxy Keys`)，可设置系统级别和分组级别的代理密钥。
-
-- **认证方式**: 与原生 API 一致，但需将原始密钥替换为配置的代理密钥。
-- **密钥作用域**: 在系统设置配置的 **全局代理密钥** 可以在所有分组使用，在分组配置的 **分组代理密钥** 仅在当前分组有效。
-- **格式**: 多个密钥使用半角英文逗号分隔。
-
-### 3. OpenAI 接口调用示例
-
-假设创建了名为 `openai` 的分组：
-
-**原始调用方式：**
-
-```bash
-curl -X POST https://api.openai.com/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-openai-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**代理调用方式：**
-
-```bash
-curl -X POST http://localhost:3001/proxy/openai/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**变更说明：**
-
-- 将 `https://api.openai.com` 替换为 `http://localhost:3001/proxy/openai`
-- 将原始 API Key 替换为**代理密钥**
-
-### 4. Gemini 接口调用示例
-
-假设创建了名为 `gemini` 的分组：
-
-**原始调用方式：**
-
-```bash
-curl -X POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=your-gemini-key \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'
-```
-
-**代理调用方式：**
-
-```bash
-curl -X POST http://localhost:3001/proxy/gemini/v1beta/models/gemini-2.5-pro:generateContent?key=your-proxy-key \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'
-```
-
-**变更说明：**
-
-- 将 `https://generativelanguage.googleapis.com` 替换为 `http://localhost:3001/proxy/gemini`
-- 将 URL 参数中的 `key=your-gemini-key` 替换为**代理密钥**
-
-### 5. Anthropic 接口调用示例
-
-假设创建了名为 `anthropic` 的分组：
-
-**原始调用方式：**
-
-```bash
-curl -X POST https://api.anthropic.com/v1/messages \
-  -H "x-api-key: sk-ant-api03-your-anthropic-key" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**代理调用方式：**
-
-```bash
-curl -X POST http://localhost:3001/proxy/anthropic/v1/messages \
-  -H "x-api-key: your-proxy-key" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**变更说明：**
-
-- 将 `https://api.anthropic.com` 替换为 `http://localhost:3001/proxy/anthropic`
-- 将 `x-api-key` 头部中的原始 API Key 替换为**代理密钥**
-
-### 6. 支持的接口
-
-**OpenAI 格式：**
-
-- `/v1/chat/completions` - 聊天对话
-- `/v1/completions` - 文本补全
-- `/v1/embeddings` - 文本嵌入
-- `/v1/models` - 模型列表
-- 以及其他所有 OpenAI 兼容接口
-
-**Gemini 格式：**
-
-- `/v1beta/models/*/generateContent` - 内容生成
-- `/v1beta/models` - 模型列表
-- 以及其他所有 Gemini 原生接口
-
-**Anthropic 格式：**
-
-- `/v1/messages` - 消息对话
-- `/v1/models` - 模型列表（如果可用）
-- 以及其他所有 Anthropic 原生接口
-
-### 7. 客户端 SDK 配置
-
-**OpenAI Python SDK：**
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="your-proxy-key",  # 使用密钥
-    base_url="http://localhost:3001/proxy/openai"  # 使用代理端点
-)
-
-response = client.chat.completions.create(
-    model="gpt-4.1-mini",
-    messages=[{"role": "user", "content": "Hello"}]
-)
-```
-
-**Google Gemini SDK (Python)：**
-
-```python
-import google.generativeai as genai
-
-# 配置 API 密钥和基础 URL
-genai.configure(
-    api_key="your-proxy-key",  # 使用代理密钥
-    client_options={"api_endpoint": "http://localhost:3001/proxy/gemini"}
-)
-
-model = genai.GenerativeModel('gemini-2.5-pro')
-response = model.generate_content("Hello")
-```
-
-**Anthropic SDK (Python)：**
-
-```python
-from anthropic import Anthropic
-
-client = Anthropic(
-    api_key="your-proxy-key",  # 使用代理密钥
-    base_url="http://localhost:3001/proxy/anthropic"  # 使用代理端点
-)
-
-response = client.messages.create(
-    model="claude-sonnet-4-20250514",
-    messages=[{"role": "user", "content": "Hello"}]
-)
-```
-
-> **重要提示**：作为透明代理服务，GPT-Load 完全保留各 AI 服务的原生 API 格式和认证方式，仅需要替换端点地址并使用在管理端配置的**代理密钥**即可无缝迁移。
 
 </details>
 
-## 贡献
+常用运维命令：
 
-感谢所有为 GPT-Load 做出贡献的开发者们！
+```bash
+docker compose logs -f      # 查看日志
+docker compose pull && docker compose up -d   # 更新到最新 2.x 镜像
+docker compose stop         # 停止服务
+```
 
-[![Contributors](https://contrib.rocks/image?repo=tbphp/gpt-load)](https://github.com/tbphp/gpt-load/graphs/contributors)
+官方 Compose 使用 `ghcr.io/tbphp/gpt-load:2`。GA 前，`2` 跟随已验证的 2.0 Beta 和 RC；GA 后只跟随稳定的 2.x。镜像精确标签会去掉 Git tag 的 `v` 前缀（例如 `2.0.0-beta.25`），`2.0-beta` 则保留为 2.0 Beta 通道；`latest` 继续留在 1.x。
 
-## 许可证
+<details>
+<summary>使用原生二进制</summary>
 
-MIT 许可证 - 详情请参阅 [LICENSE](LICENSE) 文件。
+从 [GitHub Releases](https://github.com/tbphp/gpt-load/releases) 下载对应平台的文件，建议先用随附的 `SHA256SUMS` 校验：
 
-## Star History
+```bash
+chmod +x ./gpt-load-linux-amd64
 
-[![Stargazers over time](https://starchart.cc/tbphp/gpt-load.svg?variant=adaptive)](https://starchart.cc/tbphp/gpt-load)
+HOST=127.0.0.1 DATA_DIR=./data ./gpt-load-linux-amd64
+```
+
+启动后访问 <http://127.0.0.1:3001>。提供 Linux、macOS（amd64 / arm64）与 Windows 共五个平台的便携构建；`gpt-load-windows-amd64.exe` 继续以前台模式运行。
+
+Windows 普通用户可改为下载 `gpt-load-windows-setup.exe`。双击并确认管理员权限后，安装器会注册并启动低权限 Windows 服务、设置开机启动，并创建桌面和开始菜单中的 GPT-Load 管理页面快捷方式。安装过程中会显示首次生成的管理密钥，请在关闭页面前保存；密钥仍保存在 `%ProgramData%\GPT-Load\data\auth.key`。服务配置目录为 `%ProgramData%\GPT-Load` 并从其中读取 `.env`，数据目录为 `%ProgramData%\GPT-Load\data`。
+
+覆盖安装会先优雅停止服务再更新，Windows 卸载会移除程序和服务但保留数据。高级用户仍可使用 `gpt-load-windows-amd64.exe service start|stop|restart|status` 管理已安装服务。
+
+</details>
+
+### 环境配置
+
+应用启动时读取当前目录的 `.env`，已有的进程环境变量优先。除特别说明外，修改后需要重启进程或容器；常用配置模板见 [`.env.example`](.env.example)。
+
+<details>
+<summary>查看全部环境变量</summary>
+
+| 变量                            | 默认值                                      | 说明                                                                                                                                                     |
+| ------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HOST`                          | `127.0.0.1`                                 | Native 模式的监听地址，也是 Compose 主端口和 OAuth 回调端口的默认宿主机发布地址；Compose 容器内部固定监听 `0.0.0.0`。                                    |
+| `PORT`                          | `3001`                                      | HTTP 服务端口，必须为 `1–65535`；Compose 同时用于容器端口、宿主机发布端口和健康检查。                                                                    |
+| `BIND_ADDRESS`                  | 空，继承 `HOST`                             | 仅用于 Compose，单独覆盖主服务端口的宿主机发布地址，不改变 OAuth 回调端口。                                                                              |
+| `OAUTH_CALLBACK_BIND_ADDRESS`   | 空，继承 `HOST`                             | 仅用于 Compose，单独覆盖 OAuth 固定回调端口 `1455`、`54545`、`51121` 的宿主机发布地址。                                                                  |
+| `GRACEFUL_SHUTDOWN_TIMEOUT`     | `10`                                        | 收到停止信号后等待请求结束的最长时间，正整数，单位秒。                                                                                                   |
+| `CONTAINER_STOP_GRACE_PERIOD`   | `15s`                                       | Compose 强制停止容器前的等待时间，使用 Docker duration，建议大于 `GRACEFUL_SHUTDOWN_TIMEOUT`。                                                           |
+| `READ_TIMEOUT`                  | `60`                                        | HTTP 请求读取超时，正整数，单位秒。                                                                                                                      |
+| `IDLE_TIMEOUT`                  | `120`                                       | HTTP keep-alive 空闲连接超时，正整数，单位秒。                                                                                                           |
+| `DATA_DIR`                      | `./data`                                    | 托管数据库、`auth.key`、`encryption.key` 和运行状态文件的目录；官方 Compose 固定为 `/app/data`，Windows Setup 服务固定为 `%ProgramData%\GPT-Load\data`。 |
+| `DATABASE_DSN`                  | 空，使用 `${DATA_DIR}/gpt-load.db`          | 空值使用应用托管的 SQLite；非空值支持 SQLite 路径或 URL、MySQL URL、PostgreSQL URL，并视为运维方管理的外部数据库。容器内文件路径必须位于已挂载目录。     |
+| `DATABASE_MAX_OPEN_CONNECTIONS` | `10`                                        | MySQL 和 PostgreSQL 的最大打开连接数，必须为正整数；SQLite 始终使用单连接。                                                                              |
+| `DATABASE_MAX_IDLE_CONNECTIONS` | `5`                                         | MySQL 和 PostgreSQL 的最大空闲连接数，必须为正整数且不大于 `DATABASE_MAX_OPEN_CONNECTIONS`；SQLite 始终使用单连接。                                      |
+| `AUTH_KEY`                      | 空，读取或生成 `${DATA_DIR}/auth.key`       | 管理界面和 `/api` 管理接口的 Bearer 密钥，不是数据面 AccessKey。                                                                                         |
+| `ENCRYPTION_KEY`                | 空，读取或生成 `${DATA_DIR}/encryption.key` | 用于加密渠道凭据；更换或丢失后无法解密已有凭据，必须与数据库一起备份。                                                                                   |
+| `CLIENT_IP_HEADER` | 空，使用连接 IP | 客户端 IP 请求头，如 `X-Forwarded-For` 或 `CF-Connecting-IP`；缺失或无效时回退到连接 IP。统一用于日志、访问密钥 IP 限制等，支持 IPv4/IPv6。修改后重启。 |
+| `TRUSTED_PROXIES` | 空 | 可选，逗号分隔的代理 IP 或 CIDR；仅在设置 `CLIENT_IP_HEADER` 时生效。留空直接信任所选请求头，需由部署环境保证其可信；配置后仅信任匹配的连接来源，否则使用连接 IP。`X-Forwarded-For` 有名单时从右向左取首个不可信 IP（全可信时取最左侧），无名单时取最左侧；其他头只接受单个 IP。修改后重启。 |
+| `HTTP_PROXY`                    | 空                                          | HTTP 上游请求的环境代理。                                                                                                                                |
+| `HTTPS_PROXY`                   | 空                                          | HTTPS 上游请求的环境代理。                                                                                                                               |
+| `NO_PROXY`                      | 空                                          | 逗号分隔的不经过环境代理的主机、域名或 IP。                                                                                                              |
+| `LOG_LEVEL`                     | `info`                                      | 支持 `panic`、`fatal`、`error`、`warn`、`warning`、`info`、`debug`、`trace`；无效值会告警并回退到 `info`。                                               |
+| `LOG_FORMAT`                    | `text`                                      | 支持 `text`、`json`；其他值会导致启动失败。                                                                                                              |
+| `MODELS_DEV_AUTO_SYNC_ENABLED`  | 未设置，初始默认 `true`                     | 未设置时使用管理界面的持久化设置；设置后强制开启或关闭 Models.dev 自动同步，并使管理界面中的同名选项变为只读。                                           |
+
+环境代理仅在凭据、Group 和全局设置都未指定代理时生效。
+
+</details>
+
+## 从 1.x 切换
+
+> [!WARNING]
+> GPT-Load 2.0 是完整重写的新版本，**不能**打开、导入或原地迁移 1.x 数据。
+
+部署 2.0 时请使用独立的数据库、`DATA_DIR`、端口和 Docker 卷，验证完成后再切换业务流量，并在回滚窗口关闭前保留原 1.x 部署。1.4.x 维护线文档见[官方文档](https://www.gpt-load.com/docs?lang=zh)。
+
+## 开源依赖
+
+GPT-Load 的部分能力构建在这些开源项目之上，在此致谢：
+
+| 项目                                                        | 作用                                           | 许可证     |
+| ----------------------------------------------------------- | ---------------------------------------------- | ---------- |
+| [Bifrost Core](https://github.com/maximhq/bifrost)          | 各服务商的认证、请求响应转换、流式与用量归一化 | Apache-2.0 |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | 订阅渠道的 OAuth 与执行适配                    | MIT        |
+| [Lobe Icons](https://github.com/lobehub/lobe-icons)         | 管理界面中的渠道品牌图标                       | MIT        |
+
+GPT-Load 自身负责凭据存储、账号选择、调度、重试、健康、亲和、日志与用量策略。第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，许可证全文位于 [`LICENSES/`](LICENSES/)，每个 Release 另附覆盖 Go 依赖的 CycloneDX SBOM。
+
+各渠道图标用于标识对应的上游服务商，其商标权归各自所有者；本项目与这些服务商没有从属或背书关系。
+
+## 项目支持
+
+<table>
+<tbody>
+<tr>
+<td align="center" width="33%">
+<a href="https://openai.com/">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="./screenshot/sponsor-openai-lockup-white.svg">
+<source media="(prefers-color-scheme: light)" srcset="./screenshot/sponsor-openai-lockup-black.svg">
+<img src="./screenshot/sponsor-openai-lockup-black.svg" alt="OpenAI" width="120">
+</picture>
+</a>
+<br><sub>平台支持</sub>
+</td>
+<td align="center" width="33%">
+<a href="https://linux.do"><img src="./screenshot/l.png" alt="LINUX DO" width="120"></a>
+<br><sub>社区支持</sub>
+</td>
+<td align="center" width="33%">
+<a href="https://www.digitalocean.com/?refcode=3d52cff21342&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"><img src="https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%202.svg" alt="DigitalOcean" width="120"></a>
+<br><sub>基础设施支持</sub>
+</td>
+</tr>
+</tbody>
+</table>
+
+---
+
+[MIT License](LICENSE) · [第三方声明](THIRD_PARTY_NOTICES.md) · [安全政策](SECURITY.md)

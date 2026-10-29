@@ -1,0 +1,887 @@
+package scheduler
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"gpt-load/internal/channel"
+	"gpt-load/internal/dialect"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/platform/config"
+	"gpt-load/internal/protocol"
+	"gpt-load/internal/state"
+)
+
+func TestIteratorExhaustsNativeTierBeforeConvertedTier(t *testing.T) {
+	t.Parallel()
+
+	snapshot := channelSchedulerSnapshot(t)
+	convertedWeight := 100
+	nativeWeight := 1
+	converted := snapshot.Groups[1]
+	converted.WeightManual = &convertedWeight
+	snapshot.Groups[1] = converted
+	native := snapshot.Groups[2]
+	native.WeightManual = &nativeWeight
+	snapshot.Groups[2] = native
+
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1},
+		{ID: 21, GroupID: 2},
+	}}, Query{
+		ClientProtocol: protocol.OpenAICompletions,
+		Operation:      execution.OperationChatCompletion,
+		ExternalModel:  modelPointer("public"),
+		AccessKey:      state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+
+	first, err := iterator.Next()
+	if err != nil {
+		t.Fatalf("first Next() error = %v", err)
+	}
+	if first.CredentialID != 21 || first.GroupID != 2 ||
+		first.ChannelID != channel.OpenAI || first.RouteMode != channel.RouteNative ||
+		first.ResolvedTarget.ChannelID != channel.OpenAI || first.UpstreamModelID == nil || *first.UpstreamModelID != "native-model" {
+		t.Fatalf("first Selection = %#v, want native OpenAI credential", first)
+	}
+
+	second, err := iterator.Next()
+	if err != nil {
+		t.Fatalf("second Next() error = %v", err)
+	}
+	if second.CredentialID != 11 || second.GroupID != 1 || second.ChannelID != channel.Anthropic ||
+		second.RouteMode != channel.RouteConverted || second.UpstreamModelID == nil || *second.UpstreamModelID != "converted-model" {
+		t.Fatalf("second Selection = %#v, want converted Anthropic credential", second)
+	}
+	if _, err := iterator.Next(); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("third Next() error = %v, want ErrExhausted", err)
+	}
+}
+
+func TestIteratorDoesNotLetConvertedPreferenceBypassNativeTier(t *testing.T) {
+	t.Parallel()
+
+	iterator := New(channelSchedulerSnapshot(t), fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1},
+		{ID: 21, GroupID: 2},
+	}}, Query{
+		ClientProtocol:        protocol.OpenAICompletions,
+		Operation:             execution.OperationChatCompletion,
+		ExternalModel:         modelPointer("public"),
+		PreferredCredentialID: 11,
+	})
+
+	first, err := iterator.Next()
+	if err != nil || first.CredentialID != 21 || first.RouteMode != channel.RouteNative {
+		t.Fatalf("first Next() = (%#v, %v), want native credential 21", first, err)
+	}
+	second, err := iterator.Next()
+	if err != nil || second.CredentialID != 11 || second.RouteMode != channel.RouteConverted {
+		t.Fatalf("second Next() = (%#v, %v), want preferred converted credential 11", second, err)
+	}
+}
+
+func TestImagesGenerationPrefersNativeBeforeGeminiConversions(t *testing.T) {
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{ID: 1, ChannelID: channel.Antigravity, ConnectionType: "subscription", Params: json.RawMessage(`{}`),
+				Models: []state.ModelConfig{{ID: "gemini-3.1-flash-image", Alias: "public"}}, Enabled: true},
+			{ID: 2, ChannelID: channel.OpenAI, ConnectionType: "api_key", Params: json.RawMessage(`{}`),
+				Models: []state.ModelConfig{{ID: "gpt-image-2", Alias: "public"}}, Enabled: true},
+			{ID: 3, ChannelID: channel.Gemini, ConnectionType: "api_key", Params: json.RawMessage(`{}`),
+				Models: []state.ModelConfig{{ID: "gemini-3.1-flash-image", Alias: "public"}}, Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1}, {ID: 21, GroupID: 2}, {ID: 31, GroupID: 3},
+	}}, Query{
+		ClientProtocol: protocol.OpenAIImages, Operation: execution.OperationImagesGenerate,
+		RouteRequirement: execution.RouteRequirementAny, ExternalModel: modelPointer("public"),
+		PreferredCredentialID: 11,
+	})
+	first, err := iterator.Next()
+	if err != nil || first.GroupID != 2 || first.RouteMode != channel.RouteNative {
+		t.Fatalf("first selection = %+v, error = %v", first, err)
+	}
+	second, err := iterator.Next()
+	if err != nil || second.GroupID != 1 || second.RouteMode != channel.RouteConverted ||
+		second.UpstreamModelID == nil || *second.UpstreamModelID != "gemini-3.1-flash-image" {
+		t.Fatalf("second selection = %+v, error = %v", second, err)
+	}
+	third, err := iterator.Next()
+	if err != nil || third.GroupID != 3 || third.RouteMode != channel.RouteConverted ||
+		third.UpstreamModelID == nil || *third.UpstreamModelID != "gemini-3.1-flash-image" {
+		t.Fatalf("third selection = %+v, error = %v", third, err)
+	}
+	if got := snapshot.ExecutionCandidates[protocol.OpenAIImages][execution.OperationImagesEdit]["public"]; len(got) != 1 || got[0].GroupID != 2 {
+		t.Fatalf("image edits targets = %+v", got)
+	}
+}
+
+func TestIteratorSkipGroupAndAllowedCredentialIDsApplyAcrossRouteTiers(t *testing.T) {
+	t.Parallel()
+
+	allowed := map[uint]struct{}{11: {}, 21: {}}
+	iterator := New(channelSchedulerSnapshot(t), fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1}, {ID: 12, GroupID: 1}, {ID: 21, GroupID: 2},
+	}}, Query{
+		ClientProtocol:       protocol.OpenAICompletions,
+		Operation:            execution.OperationChatCompletion,
+		ExternalModel:        modelPointer("public"),
+		AllowedCredentialIDs: allowed,
+	})
+	delete(allowed, 11)
+	allowed[12] = struct{}{}
+	iterator.SkipGroup(2)
+
+	selection, err := iterator.Next()
+	if err != nil || selection.CredentialID != 11 || selection.GroupID != 1 || selection.RouteMode != channel.RouteConverted {
+		t.Fatalf("Next() = (%#v, %v), want frozen allowed converted credential 11", selection, err)
+	}
+	if _, err := iterator.Next(); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("second Next() error = %v, want ErrExhausted", err)
+	}
+}
+
+func TestIteratorRejectsResponsesResourceOperationWithoutConfiguredModels(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{ConnectionType: "api_key", ID: 7, Name: "responses", ChannelID: channel.OpenAI,
+			Params: json.RawMessage(`{}`), Enabled: true,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{{ID: 71, GroupID: 7}}}, Query{
+		ClientProtocol: protocol.OpenAIResponses,
+		Operation:      execution.OperationResponsesRetrieve,
+		ExternalModel:  nil,
+	})
+	if iterator.StaticReason() != ReasonNoRouteTarget {
+		t.Fatalf("StaticReason() = %q, want %q", iterator.StaticReason(), ReasonNoRouteTarget)
+	}
+	if _, err := iterator.Next(); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("Next() error = %v, want ErrExhausted", err)
+	}
+}
+
+func TestCandidateGroupIDsForQueryUsesExecutionRoutesAndAccessKeyFilters(t *testing.T) {
+	t.Parallel()
+
+	snapshot := channelSchedulerSnapshot(t)
+	query := Query{
+		ClientProtocol: protocol.OpenAICompletions,
+		Operation:      execution.OperationChatCompletion,
+		ExternalModel:  modelPointer("public"),
+		AccessKey: state.AccessKeyView{
+			Status: state.AccessKeyStatusActive,
+			Filters: state.FilterSet{
+				Groups:    map[uint]struct{}{1: {}, 2: {}},
+				Protocols: map[protocol.Protocol]struct{}{protocol.OpenAICompletions: {}},
+				Models:    map[string]struct{}{"public": {}},
+			},
+		},
+	}
+	if got := CandidateGroupIDsForQuery(snapshot, query); !slices.Equal(got, []uint{2, 1}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want native then converted [2 1]", got)
+	}
+
+	query.AccessKey.Filters.Groups = map[uint]struct{}{1: {}}
+	if got := CandidateGroupIDsForQuery(snapshot, query); !slices.Equal(got, []uint{1}) {
+		t.Fatalf("CandidateGroupIDsForQuery() with group filter = %#v, want [1]", got)
+	}
+
+	query.AccessKey.Filters.Protocols = map[protocol.Protocol]struct{}{protocol.Anthropic: {}}
+	if got := CandidateGroupIDsForQuery(snapshot, query); len(got) != 0 {
+		t.Fatalf("CandidateGroupIDsForQuery() with protocol filter = %#v, want empty", got)
+	}
+}
+
+func TestCandidateGroupIDsForQueryRejectsResourceOperationWithoutConfiguredModels(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{ConnectionType: "api_key", ID: 7, Name: "official", ChannelID: channel.OpenAI,
+				Params: json.RawMessage(`{}`), Enabled: true,
+			},
+			{ConnectionType: "api_key", ID: 8, Name: "compatible", ChannelID: channel.OpenAICompatible,
+				Params: json.RawMessage(`{"base_url":"https://compatible.example/v1"}`), Enabled: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	got := CandidateGroupIDsForQuery(snapshot, Query{
+		ClientProtocol:   protocol.OpenAIResponses,
+		Operation:        execution.OperationResponsesRetrieve,
+		RouteRequirement: execution.RouteRequirementNative,
+		ExternalModel:    nil,
+		AccessKey:        state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+	if len(got) != 0 {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want none", got)
+	}
+}
+
+func TestCodexLiveSchedulesClientModelWithoutGroupMappingAndHonorsKeyFilter(t *testing.T) {
+	t.Parallel()
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{ID: 7, ChannelID: channel.Codex, ConnectionType: "subscription",
+			Params: json.RawMessage(`{}`), Enabled: true}},
+		Credentials: []state.CredentialConfig{{ID: 71, GroupID: 7, Status: state.CredentialStatusActive,
+			Version: 1, IdentityGeneration: 1, Fingerprint: "voice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := Query{ClientProtocol: protocol.CodexLive, Operation: execution.OperationLiveCall,
+		RouteRequirement: execution.RouteRequirementNative, ExternalModel: modelPointer("client-live-model"),
+		AccessKey: state.AccessKeyView{Status: state.AccessKeyStatusActive,
+			Filters: state.FilterSet{Models: map[string]struct{}{"client-live-model": {}}}},
+	}
+	selection, err := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{{ID: 71, GroupID: 7}}}, query).Next()
+	if err != nil || selection.UpstreamModelID == nil || *selection.UpstreamModelID != "client-live-model" || selection.GroupID != 7 {
+		t.Fatalf("Codex live selection = %#v, error=%v", selection, err)
+	}
+	query.AccessKey.Filters.Models = map[string]struct{}{"other-model": {}}
+	if got := CandidateGroupIDsForQuery(snapshot, query); len(got) != 0 {
+		t.Fatalf("filtered live groups = %v", got)
+	}
+}
+
+func TestRouteRequirementKeepsStatefulResponsesOnNativeTargets(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{ConnectionType: "api_key", ID: 7, Name: "official", ChannelID: channel.OpenAI,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-native", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 8, Name: "compatible", ChannelID: channel.OpenAICompatible,
+				Params: json.RawMessage(`{"base_url":"https://compatible.example/v1"}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-converted", Alias: "gpt"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+
+	nativeQuery := Query{
+		ClientProtocol:   protocol.OpenAIResponses,
+		Operation:        execution.OperationResponsesCreate,
+		RouteRequirement: execution.RouteRequirementNative,
+		ExternalModel:    modelPointer("gpt"),
+		AccessKey:        state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}
+	if got := CandidateGroupIDsForQuery(snapshot, nativeQuery); !slices.Equal(got, []uint{7}) {
+		t.Fatalf("native CandidateGroupIDsForQuery() = %#v, want [7]", got)
+	}
+
+	inspection, err := Inspect(snapshot, []CredentialRuntimeView{
+		{ID: 71, GroupID: 7, Status: state.CredentialStatusActive},
+		{ID: 81, GroupID: 8, Status: state.CredentialStatusActive},
+	}, nativeQuery, time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if inspection.RouteRequirement != execution.RouteRequirementNative || len(inspection.Groups) != 2 {
+		t.Fatalf("Inspection = %#v", inspection)
+	}
+	if !inspection.Groups[0].RouteRequirementSatisfied || inspection.Groups[0].RouteMode != channel.RouteNative {
+		t.Fatalf("native group = %#v", inspection.Groups[0])
+	}
+	if inspection.Groups[1].RouteRequirementSatisfied || inspection.Groups[1].Reason != ReasonNativeRouteRequired {
+		t.Fatalf("converted group = %#v", inspection.Groups[1])
+	}
+}
+
+func TestResponsesContinuationSeparatesStorageFromOtherResourceRequirements(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{ConnectionType: "api_key", ID: 7, Name: "openai", ChannelID: channel.OpenAI,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-openai", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 8, Name: "openrouter", ChannelID: channel.OpenRouter,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "openai/gpt", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 9, Name: "xai", ChannelID: channel.XAI,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "grok", Alias: "gpt"}},
+			},
+			{ConnectionType: "subscription", ID: 10, Name: "codex", ChannelID: channel.Codex,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-codex", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 11, Name: "converted", ChannelID: channel.Anthropic,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "claude", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 12, Name: "cpa", ChannelID: channel.CLIProxyAPI,
+				Params: json.RawMessage(`{"base_url":"https://cpa.example"}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-cpa", Alias: "gpt"}},
+			},
+			{ConnectionType: "api_key", ID: 13, Name: "newapi", ChannelID: channel.NewAPI,
+				Params: json.RawMessage(`{"base_url":"https://newapi.example"}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "gpt-newapi", Alias: "gpt"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+
+	got := CandidateGroupIDsForQuery(snapshot, Query{
+		ClientProtocol:   protocol.OpenAIResponses,
+		Operation:        execution.OperationResponsesCreate,
+		RouteRequirement: execution.RouteRequirementNative,
+		ExternalModel:    modelPointer("gpt"),
+		AccessKey:        state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+	if !slices.Equal(got, []uint{7}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want lifecycle-capable OpenAI group [7]", got)
+	}
+	for _, test := range []struct {
+		name   string
+		fields string
+		want   []uint
+	}{
+		{"continuation", `,"input":"continue"`, []uint{7, 9, 12, 13}},
+		{"unstored next response", `,"store":false`, []uint{7, 9, 12, 13}},
+		{"conversation", `,"conversation":"conv_1"`, []uint{7}},
+		{"background", `,"background":true`, []uint{7}},
+		{"stored prompt", `,"prompt":{"id":"pmpt_1"}`, []uint{7}},
+		{"input reference", `,"input":[{"type":"item_reference","id":"item_1"}]`, []uint{7}},
+		{"file search", `,"tools":[{"type":"file_search","vector_store_ids":["vs_1"]}]`, []uint{7}},
+		{"null store", `,"store":null`, []uint{7}},
+		{"invalid store", `,"store":"invalid"`, []uint{7}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metadata, err := dialect.NewOpenAIResponses().InspectRequest(&dialect.ParsedRequest{
+				Method: http.MethodPost, Path: "/v1/responses",
+				Body: []byte(`{"model":"gpt","previous_response_id":"resp_1"` + test.fields + `}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := Query{
+				ClientProtocol: protocol.OpenAIResponses, Operation: metadata.Operation,
+				RouteRequirement: metadata.RouteRequirement, ResponsesStorePreference: metadata.ResponsesStorePreference,
+				ExternalModel: metadata.Model,
+			}
+			if got := CandidateGroupIDsForQuery(snapshot, query); !slices.Equal(got, test.want) {
+				t.Fatalf("candidate groups = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestResponsesStorePreferenceKeepsTheWholeRequestOnExactTargets(t *testing.T) {
+	t.Parallel()
+
+	snapshot := responsesStoreSchedulerSnapshot(t, true)
+	query := Query{
+		ClientProtocol:           protocol.OpenAIResponses,
+		Operation:                execution.OperationResponsesCreate,
+		ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		ExternalModel:            modelPointer("gpt"),
+		AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}
+	got := CandidateGroupIDsForQuery(snapshot, query)
+	slices.Sort(got)
+	if !slices.Equal(got, []uint{1, 2, 3, 4}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want every matching group", got)
+	}
+
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1},
+		{ID: 21, GroupID: 2},
+		{ID: 31, GroupID: 3},
+		{ID: 41, GroupID: 4},
+	}}, query)
+	selection, err := iterator.Next()
+	if err != nil || selection.GroupID != 2 || selection.ChannelID != channel.OpenAI ||
+		selection.ResponsesStoreDowngraded {
+		t.Fatalf("Next() = (%#v, %v), want exact OpenAI", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.GroupID != 1 || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("second Next() = (%#v, %v), want native stateless fallback", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.GroupID != 4 || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("third Next() = (%#v, %v), want remaining native stateless fallback", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.GroupID != 3 || selection.RouteMode != channel.RouteConverted ||
+		!selection.ResponsesStoreDowngraded {
+		t.Fatalf("fourth Next() = (%#v, %v), want converted stateless fallback", selection, err)
+	}
+}
+
+func TestResponsesStorePreferenceUsesNativeThenConvertedStatelessFallback(t *testing.T) {
+	t.Parallel()
+
+	snapshot := responsesStoreSchedulerSnapshot(t, false)
+	query := Query{
+		ClientProtocol:           protocol.OpenAIResponses,
+		Operation:                execution.OperationResponsesCreate,
+		ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		ExternalModel:            modelPointer("gpt"),
+		AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}
+	got := CandidateGroupIDsForQuery(snapshot, query)
+	slices.Sort(got)
+	if !slices.Equal(got, []uint{1, 3, 4}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want every stateless fallback", got)
+	}
+
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 11, GroupID: 1},
+		{ID: 31, GroupID: 3},
+		{ID: 41, GroupID: 4},
+	}}, query)
+	selection, err := iterator.Next()
+	if err != nil || selection.GroupID != 1 || selection.ChannelID != channel.Codex ||
+		selection.RouteMode != channel.RouteNative || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("Next() = (%#v, %v), want native Codex store fallback", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.GroupID != 4 || selection.ChannelID != channel.OpenRouter ||
+		selection.RouteMode != channel.RouteNative || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("second Next() = (%#v, %v), want native OpenRouter store fallback", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.GroupID != 3 || selection.ChannelID != channel.Anthropic ||
+		selection.RouteMode != channel.RouteConverted || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("third Next() = (%#v, %v), want converted Anthropic store fallback", selection, err)
+	}
+
+	filteredQuery := query
+	filteredQuery.AccessKey.Filters.Groups = map[uint]struct{}{3: {}, 4: {}}
+	got = CandidateGroupIDsForQuery(snapshot, filteredQuery)
+	slices.Sort(got)
+	if !slices.Equal(got, []uint{3, 4}) {
+		t.Fatalf("filtered CandidateGroupIDsForQuery() = %#v, want authorized fallbacks", got)
+	}
+}
+
+func TestResponsesStorePreferenceAllowsVerifiedGrokFallback(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{
+			ConnectionType: "subscription",
+			ID:             5,
+			Name:           "grok",
+			ChannelID:      channel.Grok,
+			Params:         json.RawMessage(`{}`),
+			Enabled:        true,
+			Models:         []state.ModelConfig{{ID: "grok-upstream", Alias: "gpt"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	query := Query{
+		ClientProtocol:           protocol.OpenAIResponses,
+		Operation:                execution.OperationResponsesCreate,
+		ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		ExternalModel:            modelPointer("gpt"),
+		AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}
+	selection, err := New(
+		snapshot,
+		fakeCredentialSource{keys: []state.CredentialMeta{{ID: 51, GroupID: 5}}},
+		query,
+	).Next()
+	if err != nil || selection.ChannelID != channel.Grok || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("Next() = (%#v, %v), want Grok store fallback", selection, err)
+	}
+}
+
+func TestResponsesStorePreferenceFallsBackWhenUpstreamManagedTargetLacksCredentials(t *testing.T) {
+	t.Parallel()
+
+	iterator := New(
+		responsesStoreSchedulerSnapshot(t, true),
+		fakeCredentialSource{keys: []state.CredentialMeta{{ID: 11, GroupID: 1}}},
+		Query{
+			ClientProtocol:           protocol.OpenAIResponses,
+			Operation:                execution.OperationResponsesCreate,
+			ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+			ExternalModel:            modelPointer("gpt"),
+			AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+		},
+	)
+	selection, err := iterator.Next()
+	if err != nil || selection.GroupID != 1 || selection.ChannelID != channel.Codex ||
+		!selection.ResponsesStoreDowngraded {
+		t.Fatalf("Next() = (%#v, %v), want Codex stateless fallback", selection, err)
+	}
+}
+
+func TestResponsesStorePreferenceAllowsDeclaredConvertedStatelessTarget(t *testing.T) {
+	t.Parallel()
+
+	target, err := channel.NewRegistry().Resolve(channel.Anthropic, nil)
+	if err != nil {
+		t.Fatalf("Resolve(openai) error = %v", err)
+	}
+	matched, downgraded, reason := routeRequirementSatisfied(
+		normalizedQuery{
+			clientProtocol:           protocol.OpenAIResponses,
+			operation:                execution.OperationResponsesCreate,
+			routeRequirement:         execution.RouteRequirementAny,
+			responsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		},
+		state.RouteTarget{Mode: channel.RouteConverted, ResolvedTarget: target},
+	)
+	if !matched || !downgraded || reason != "" {
+		t.Fatalf("routeRequirementSatisfied() = (%t, %t, %q), want converted stateless target", matched, downgraded, reason)
+	}
+}
+
+func TestResponsesStorePreferenceKeepsUpstreamManagedGatewayUndowngraded(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{
+			ConnectionType: "api_key", ID: 12, Name: "newapi", ChannelID: channel.NewAPI,
+			Params: json.RawMessage(`{"base_url":"https://newapi.example"}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "upstream", Alias: "gpt"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{{
+		ID: 121, GroupID: 12,
+	}}}, Query{
+		ClientProtocol:           protocol.OpenAIResponses,
+		Operation:                execution.OperationResponsesCreate,
+		ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		ExternalModel:            modelPointer("gpt"),
+		AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}).Next()
+	if err != nil || selection.ChannelID != channel.NewAPI || selection.ResponsesStoreDowngraded {
+		t.Fatalf("Next() = (%#v, %v), want upstream-managed New API", selection, err)
+	}
+}
+
+func TestResponsesStorePreferenceDefersStatelessDeepSeekTarget(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{
+				ConnectionType: "api_key", ID: 11, Name: "deepseek", ChannelID: channel.DeepSeek,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "deepseek-model", Alias: "gpt"}},
+			},
+			{
+				ConnectionType: "api_key", ID: 12, Name: "openai", ChannelID: channel.OpenAI,
+				Params: json.RawMessage(`{}`), Enabled: true,
+				Models: []state.ModelConfig{{ID: "openai-model", Alias: "gpt"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{
+		{ID: 111, GroupID: 11},
+		{ID: 121, GroupID: 12},
+	}}, Query{
+		ClientProtocol:           protocol.OpenAIResponses,
+		Operation:                execution.OperationResponsesCreate,
+		ResponsesStorePreference: execution.ResponsesStorePreferencePreferStored,
+		ExternalModel:            modelPointer("gpt"),
+		AccessKey:                state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+
+	selection, err := iterator.Next()
+	if err != nil || selection.ChannelID != channel.OpenAI || selection.ResponsesStoreDowngraded {
+		t.Fatalf("first Next() = (%#v, %v), want upstream-managed OpenAI", selection, err)
+	}
+	selection, err = iterator.Next()
+	if err != nil || selection.ChannelID != channel.DeepSeek || !selection.ResponsesStoreDowngraded {
+		t.Fatalf("second Next() = (%#v, %v), want stateless DeepSeek fallback", selection, err)
+	}
+}
+
+func TestOpenRouterRoutesResponsesWithReasoningOptOut(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{ConnectionType: "api_key", ID: 9, Name: "openrouter", ChannelID: channel.OpenRouter,
+			Params: json.RawMessage(`{}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "openai/gpt-5.6-luna", Alias: "gpt-5.6-luna"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	request := &dialect.ParsedRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/responses",
+		Body:   []byte(`{"model":"gpt-5.6-luna","reasoning":{"effort":"none"},"store":false}`),
+	}
+	metadata, err := dialect.NewOpenAIResponses().InspectRequest(request)
+	if err != nil {
+		t.Fatalf("InspectRequest() error = %v", err)
+	}
+	if metadata.RouteRequirement != execution.RouteRequirementAny {
+		t.Fatalf("RouteRequirement = %q, want any", metadata.RouteRequirement)
+	}
+	selection, err := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{{
+		ID: 91, GroupID: 9,
+	}}}, Query{
+		ClientProtocol:   protocol.OpenAIResponses,
+		Operation:        metadata.Operation,
+		RouteRequirement: metadata.RouteRequirement,
+		ExternalModel:    modelPointer("gpt-5.6-luna"),
+		AccessKey:        state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}).Next()
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if selection.GroupID != 9 || selection.ChannelID != channel.OpenRouter ||
+		selection.RouteMode != channel.RouteNative || selection.UpstreamModelID == nil ||
+		*selection.UpstreamModelID != "openai/gpt-5.6-luna" {
+		t.Fatalf("Selection = %#v, want native OpenRouter target", selection)
+	}
+}
+
+func TestCandidateGroupIDsForQueryRoutesAnthropicThinkingToOpenAICompatible(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{ConnectionType: "api_key", ID: 10, Name: "compatible", ChannelID: channel.OpenAICompatible,
+			Params: json.RawMessage(`{"base_url":"https://compatible.example/v1"}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "reasoning-model", Alias: "claude-sonnet"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	metadata, err := dialect.NewAnthropic().InspectRequest(&dialect.ParsedRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/messages",
+		Body: []byte(`{
+			"model":"claude-sonnet",
+			"thinking":{"type":"enabled","budget_tokens":4096},
+			"messages":[{"role":"user","content":"hello"}]
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("InspectRequest() error = %v", err)
+	}
+	if metadata.RouteRequirement != execution.RouteRequirementAny {
+		t.Fatalf("Anthropic thinking RouteRequirement = %q, want any", metadata.RouteRequirement)
+	}
+
+	got := CandidateGroupIDsForQuery(snapshot, Query{
+		ClientProtocol:   protocol.Anthropic,
+		Operation:        metadata.Operation,
+		RouteRequirement: metadata.RouteRequirement,
+		ExternalModel:    modelPointer("claude-sonnet"),
+		AccessKey:        state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+	if !slices.Equal(got, []uint{10}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want converted OpenAI-compatible group [10]", got)
+	}
+}
+
+func TestCandidateGroupIDsForQueryDoesNotApplyOrdinaryCapabilityGate(t *testing.T) {
+	t.Parallel()
+
+	got := CandidateGroupIDsForQuery(channelSchedulerSnapshot(t), Query{
+		ClientProtocol: protocol.OpenAICompletions,
+		Operation:      execution.OperationChatCompletion,
+		ExternalModel:  modelPointer("converted-only"),
+		AccessKey:      state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	})
+	if !slices.Equal(got, []uint{1}) {
+		t.Fatalf("CandidateGroupIDsForQuery() = %#v, want converted group [1]", got)
+	}
+}
+
+func TestOperationUnsupportedIsStableAndInspectionIsNeutral(t *testing.T) {
+	t.Parallel()
+
+	snapshot := channelSchedulerSnapshot(t)
+	query := Query{
+		ClientProtocol: protocol.Anthropic,
+		Operation:      execution.OperationResponsesRetrieve,
+		AccessKey:      state.AccessKeyView{Status: state.AccessKeyStatusActive},
+	}
+	iterator := New(snapshot, fakeCredentialSource{keys: []state.CredentialMeta{{ID: 11, GroupID: 1}}}, query)
+	if iterator.StaticReason() != ReasonOperationUnsupported {
+		t.Fatalf("StaticReason() = %q, want %q", iterator.StaticReason(), ReasonOperationUnsupported)
+	}
+	if _, err := iterator.Next(); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("Next() error = %v, want ErrExhausted", err)
+	}
+
+	inspection, err := Inspect(snapshot, []state.CredentialRuntimeView{{
+		ID: 11, GroupID: 1, Status: state.CredentialStatusActive,
+	}}, query, time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if inspection.Routable || inspection.Reason != ReasonOperationUnsupported ||
+		inspection.ClientProtocol != protocol.Anthropic || inspection.Operation != execution.OperationResponsesRetrieve ||
+		len(inspection.Groups) != 0 {
+		t.Fatalf("Inspection = %#v", inspection)
+	}
+	encoded, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatalf("json.Marshal(Inspection) error = %v", err)
+	}
+	implementationName := "bif" + "rost"
+	if strings.Contains(string(encoded), "target_config") || strings.Contains(string(encoded), "base_url") ||
+		strings.Contains(strings.ToLower(string(encoded)), implementationName) {
+		t.Fatalf("Inspection leaked execution implementation details: %s", encoded)
+	}
+}
+
+func TestInspectionExplainsAllowedCredentialScope(t *testing.T) {
+	t.Parallel()
+
+	inspection, err := Inspect(channelSchedulerSnapshot(t), []CredentialRuntimeView{
+		{ID: 11, GroupID: 1, Status: state.CredentialStatusActive},
+		{ID: 12, GroupID: 1, Status: state.CredentialStatusActive},
+		{ID: 21, GroupID: 2, Status: state.CredentialStatusActive},
+	}, Query{
+		ClientProtocol:       protocol.OpenAICompletions,
+		Operation:            execution.OperationChatCompletion,
+		ExternalModel:        modelPointer("public"),
+		AccessKey:            state.AccessKeyView{Status: state.AccessKeyStatusActive},
+		AllowedCredentialIDs: map[uint]struct{}{11: {}},
+	}, time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if !inspection.Routable || len(inspection.Groups) != 2 {
+		t.Fatalf("Inspection = %#v", inspection)
+	}
+	native, converted := inspection.Groups[0], inspection.Groups[1]
+	if native.RouteMode != channel.RouteNative || native.Routable ||
+		native.Reason != ReasonNoAvailableCredential || len(native.Credentials) != 1 ||
+		native.Credentials[0].Reason != ReasonCredentialNotAllowed {
+		t.Fatalf("native GroupInspection = %#v", native)
+	}
+	if converted.RouteMode != channel.RouteConverted || !converted.Routable || len(converted.Credentials) != 2 ||
+		!converted.Credentials[0].Available || converted.Credentials[0].CredentialID != 11 ||
+		converted.Credentials[1].Reason != ReasonCredentialNotAllowed {
+		t.Fatalf("converted GroupInspection = %#v", converted)
+	}
+}
+
+func channelSchedulerSnapshot(t *testing.T) *state.ConfigSnapshot {
+	t.Helper()
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{
+			{ConnectionType: "api_key", ID: 1, Name: "converted", ChannelID: channel.Anthropic, Params: json.RawMessage(`{}`),
+				Models: []state.ModelConfig{
+					{ID: "converted-model", Alias: "public"},
+					{ID: "converted-only", Alias: "converted-only"},
+				},
+				Enabled: true,
+			},
+			{ConnectionType: "api_key", ID: 2, Name: "native", ChannelID: channel.OpenAI, Params: json.RawMessage(`{}`),
+				Models: []state.ModelConfig{{ID: "native-model", Alias: "public"}}, Enabled: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	return snapshot
+}
+
+func responsesStoreSchedulerSnapshot(t *testing.T, includeExact bool) *state.ConfigSnapshot {
+	t.Helper()
+	groups := []state.GroupConfig{
+		{ConnectionType: "subscription", ID: 1, Name: "codex", ChannelID: channel.Codex,
+			Params: json.RawMessage(`{}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "gpt-codex", Alias: "gpt"}},
+		},
+		{ConnectionType: "api_key", ID: 3, Name: "converted", ChannelID: channel.Anthropic,
+			Params: json.RawMessage(`{}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "claude", Alias: "gpt"}},
+		},
+		{ConnectionType: "api_key", ID: 4, Name: "stateless-native", ChannelID: channel.OpenRouter,
+			Params: json.RawMessage(`{}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "openai/gpt", Alias: "gpt"}},
+		},
+	}
+	if includeExact {
+		groups = append(groups, state.GroupConfig{
+			ConnectionType: "api_key", ID: 2, Name: "openai", ChannelID: channel.OpenAI,
+			Params: json.RawMessage(`{}`), Enabled: true,
+			Models: []state.ModelConfig{{ID: "gpt-openai", Alias: "gpt"}},
+		})
+	}
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(),
+		Groups:          groups,
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	return snapshot
+}
+
+func TestCodexLiveDisabledGroupRemainsAvailableForText(t *testing.T) {
+	snapshot, err := state.Compile(state.CompileInput{ChannelRegistry: channel.NewRegistry(),
+		Groups: []state.GroupConfig{{ID: 7, ChannelID: channel.Codex, ConnectionType: "subscription", Params: json.RawMessage(`{}`), Enabled: true,
+			Settings: config.Settings{"codex_live_mode": "off"}, Models: []state.ModelConfig{{ID: "text-model"}}}},
+		Credentials: []state.CredentialConfig{{ID: 71, GroupID: 7, Status: state.CredentialStatusActive, Version: 1, IdentityGeneration: 1, Fingerprint: "voice"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := Query{ClientProtocol: protocol.CodexLive, Operation: execution.OperationLiveCall, RouteRequirement: execution.RouteRequirementNative, ExternalModel: modelPointer("client-live-model"), AccessKey: state.AccessKeyView{Status: state.AccessKeyStatusActive}}
+	if got := CandidateGroupIDsForQuery(snapshot, query); len(got) != 0 {
+		t.Fatalf("disabled live groups = %v", got)
+	}
+	inspection, err := Inspect(snapshot, nil, query, time.Now())
+	if err != nil || inspection.Reason != ReasonCodexLiveDisabled {
+		t.Fatalf("inspection = %+v, %v", inspection, err)
+	}
+	query.ClientProtocol, query.Operation, query.ExternalModel = protocol.OpenAIResponses, execution.OperationResponsesCreate, modelPointer("text-model")
+	query.RouteRequirement = execution.RouteRequirementAny
+	if got := CandidateGroupIDsForQuery(snapshot, query); len(got) != 1 {
+		t.Fatalf("text groups = %v", got)
+	}
+}

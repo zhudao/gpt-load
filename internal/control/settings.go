@@ -1,0 +1,515 @@
+package control
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+
+	"gpt-load/internal/automodel"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/health"
+	"gpt-load/internal/jev"
+	"gpt-load/internal/outboundproxy"
+	"gpt-load/internal/platform/encryption"
+	"gpt-load/internal/platform/epochms"
+	app_errors "gpt-load/internal/platform/errors"
+	"gpt-load/internal/protocol"
+	"gpt-load/internal/requestaudit"
+	"gpt-load/internal/requestredact"
+	"gpt-load/internal/state"
+	stateloader "gpt-load/internal/state/loader"
+	"gpt-load/internal/storage/models"
+)
+
+type HeaderRulesResponse struct {
+	Set    map[string]string `json:"set"`
+	Remove []string          `json:"remove"`
+}
+
+type CORSConfigResponse struct {
+	Enabled          bool     `json:"enabled"`
+	AllowedOrigins   []string `json:"allowed_origins"`
+	AllowedMethods   []string `json:"allowed_methods"`
+	AllowedHeaders   []string `json:"allowed_headers"`
+	ExposedHeaders   []string `json:"exposed_headers"`
+	AllowCredentials bool     `json:"allow_credentials"`
+	MaxAge           int      `json:"max_age"`
+}
+
+type SettingsValuesResponse struct {
+	ErrorRules                       []health.ErrorRule    `json:"error_rules"`
+	GlobalConcurrencyLimit           int64                 `json:"global_concurrency_limit"`
+	DefaultAccessKeyConcurrencyLimit int64                 `json:"default_access_key_concurrency_limit"`
+	DefaultGroupConcurrencyLimit     int64                 `json:"default_group_concurrency_limit"`
+	RequestRedaction                 []requestredact.Rule  `json:"request_redaction"`
+	Jev                              jev.Config            `json:"jev"`
+	RequestAudit                     requestaudit.Config   `json:"request_audit"`
+	AutoModel                        AutoModelSettingsView `json:"auto_model"`
+	FirstByteTimeout                 int64                 `json:"first_byte_timeout"`
+	RequestTimeout                   int64                 `json:"request_timeout"`
+	StreamIdleTimeout                int64                 `json:"stream_idle_timeout"`
+	HeaderRules                      HeaderRulesResponse   `json:"header_rules"`
+	CORS                             CORSConfigResponse    `json:"cors"`
+	ResponseHeaderRules              HeaderRulesResponse   `json:"response_header_rules"`
+	RetryCount                       int                   `json:"retry_count"`
+	RouteStrategy                    state.RouteStrategy   `json:"route_strategy"`
+	BlacklistThreshold               int                   `json:"blacklist_threshold"`
+	AffinityEnabled                  bool                  `json:"affinity_enabled"`
+	CodexLiveMode                    state.CodexLiveMode   `json:"codex_live_mode"`
+	ResponsesWebsocketEnabled        bool                  `json:"responses_websocket_enabled"`
+	EmptyResponseRetry               bool                  `json:"empty_response_retry"`
+	AffinityTTL                      int64                 `json:"affinity_ttl"`
+	AffinityCapacity                 int                   `json:"affinity_capacity"`
+	ValidationInterval               int64                 `json:"validation_interval"`
+	RequestLogRetentionDays          int                   `json:"request_log_retention_days"`
+	ModelsDevAutoSyncEnabled         bool                  `json:"models_dev_auto_sync_enabled"`
+	ProxyConfig                      outboundproxy.View    `json:"proxy_config"`
+}
+
+type DecisionRouteOption struct {
+	GroupID   uint     `json:"group_id"`
+	GroupName string   `json:"group_name"`
+	Models    []string `json:"models"`
+}
+type AuditAccessKeyOption struct {
+	ID   uint   `json:"id"`
+	Name string `json:"name"`
+}
+
+type SettingsResponse struct {
+	DecisionRoutes     []DecisionRouteOption  `json:"decision_routes"`
+	AuditAccessKeys    []AuditAccessKeyOption `json:"audit_access_keys"`
+	RequestAuditPreset requestaudit.Config    `json:"request_audit_preset"`
+	AutoModelTemplate  automodel.Entry        `json:"auto_model_template"`
+	DecisionModels     []string               `json:"decision_models"`
+	Revision           uint64                 `json:"-"`
+	Values             SettingsValuesResponse `json:"values"`
+	Overrides          []string               `json:"overrides"`
+	ReadOnly           []string               `json:"read_only,omitempty"`
+}
+
+type SettingsUpdateRequest struct {
+	Settings map[string]json.RawMessage `json:"settings"`
+}
+
+type persistedSettingUpdate struct {
+	key   string
+	value *string
+}
+
+func (request *SettingsUpdateRequest) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateJSONFields(data); err != nil {
+		return err
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if object == nil || len(object) != 1 {
+		return fmt.Errorf("request body must contain only settings")
+	}
+	rawSettings, exists := object["settings"]
+	if !exists {
+		return fmt.Errorf("request body must contain settings")
+	}
+	trimmed := bytes.TrimSpace(rawSettings)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '{' {
+		return fmt.Errorf("settings must be a non-null JSON object")
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(rawSettings, &settings); err != nil {
+		return err
+	}
+	if settings == nil {
+		return fmt.Errorf("settings must be a non-null JSON object")
+	}
+	request.Settings = settings
+	return nil
+}
+
+func (s *Service) GetSettings(ctx context.Context) (SettingsResponse, error) {
+	s.writeMu.RLock()
+	defer s.writeMu.RUnlock()
+
+	snapshot := s.manager.Current()
+	if snapshot == nil {
+		return SettingsResponse{}, app_errors.ErrInternalServer
+	}
+	return s.getSettingsWithSnapshot(ctx, s.db, snapshot)
+}
+
+func (s *Service) getSettingsWithSnapshot(
+	ctx context.Context,
+	db *gorm.DB,
+	snapshot *state.ConfigSnapshot,
+) (SettingsResponse, error) {
+	var rows []models.SystemSetting
+	if err := db.WithContext(ctx).
+		Order(clause.OrderBy{Columns: []clause.OrderByColumn{{Column: clause.Column{Name: "key"}}}}).
+		Find(&rows).Error; err != nil {
+		return SettingsResponse{}, app_errors.ParseDBError(err)
+	}
+	catalog, err := stateloader.LoadProxyCatalog(ctx, db, s.encryption)
+	if err != nil {
+		return SettingsResponse{}, app_errors.ErrInternalServer
+	}
+	return mapSettingsResponse(
+		snapshot,
+		rows,
+		s.modelsDevAutoSyncOverride,
+		s.encryption,
+		s.environmentProxy,
+		catalog,
+	)
+}
+
+func (s *Service) UpdateSettings(
+	ctx context.Context,
+	request SettingsUpdateRequest,
+) (SettingsResponse, error) {
+	updates, err := normalizeSettingUpdates(request, s.encryption)
+	if err != nil {
+		return SettingsResponse{}, err
+	}
+	if s.modelsDevAutoSyncOverride != nil && settingRequestContains(request, state.SettingModelsDevAutoSyncEnabled) {
+		return SettingsResponse{}, app_errors.ErrValidation
+	}
+
+	previousAutoSyncEnabled := false
+	snapshot, err := s.writeConfig(ctx, func(tx *gorm.DB) error {
+		previousAutoSyncEnabled = s.modelsDevAutoSyncEnabled()
+		for index := range updates {
+			if updates[index].key == outboundproxy.SystemSettingKey {
+				value, err := s.managedProxyOverride(ctx, tx, updates[index].value)
+				if err != nil {
+					return err
+				}
+				updates[index].value = value
+			}
+		}
+		if raw, exists := request.Settings[automodel.SettingKey]; exists {
+			update, err := s.normalizeAutoModelUpdate(tx, raw)
+			if err != nil {
+				return err
+			}
+			updates = append(updates, update)
+		}
+		if err := s.applySettingUpdates(tx, updates); err != nil {
+			return err
+		}
+		if _, sharedChanged := request.Settings[jev.SettingKey]; sharedChanged {
+			return s.clearNestedJevConfig(tx)
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		return SettingsResponse{}, err
+	}
+	s.requestCatalogSyncOnEnable(
+		settingRequestContains(request, state.SettingModelsDevAutoSyncEnabled),
+		previousAutoSyncEnabled,
+		snapshot.Settings.ModelsDevAutoSyncEnabled,
+	)
+	return s.GetSettings(ctx)
+}
+
+func (s *Service) requestCatalogSyncOnEnable(requested, before, after bool) {
+	if requested && !before && after && s.catalogSync != nil {
+		s.catalogSync.RequestImmediateSync()
+	}
+}
+
+func (s *Service) applySettingUpdates(
+	tx *gorm.DB,
+	updates []persistedSettingUpdate,
+) error {
+	for _, update := range updates {
+		if update.value == nil {
+			if err := tx.Where(&models.SystemSetting{Key: update.key}).
+				Delete(&models.SystemSetting{}).Error; err != nil {
+				return app_errors.ParseDBError(err)
+			}
+			continue
+		}
+		updatedAtMS, err := epochms.FromTime(s.now())
+		if err != nil {
+			return app_errors.ErrInternalServer
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at_ms"}),
+		}).Create(&models.SystemSetting{
+			Key:         update.key,
+			Value:       *update.value,
+			UpdatedAtMS: updatedAtMS,
+		}).Error; err != nil {
+			return app_errors.ParseDBError(err)
+		}
+	}
+	return nil
+}
+
+func normalizeSettingUpdates(
+	request SettingsUpdateRequest,
+	encryptionService encryption.Service,
+) ([]persistedSettingUpdate, error) {
+	if len(request.Settings) == 0 {
+		return nil, app_errors.ErrBadRequest
+	}
+	keys := make([]string, 0, len(request.Settings))
+	for key := range request.Settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	updates := make([]persistedSettingUpdate, 0, len(keys))
+	for _, key := range keys {
+		if key == automodel.SettingKey {
+			continue
+		}
+		if key != requestredact.SettingKey && key != outboundproxy.SystemSettingKey && key != jev.SettingKey && key != requestaudit.SettingKey && !state.IsRuntimeSettingKey(key) {
+			return nil, app_errors.ErrValidation
+		}
+		raw := bytes.TrimSpace(request.Settings[key])
+		if bytes.Equal(raw, []byte("null")) {
+			updates = append(updates, persistedSettingUpdate{key: key})
+			continue
+		}
+		if key == jev.SettingKey || key == requestaudit.SettingKey || key == requestredact.SettingKey {
+			if encryptionService == nil || rejectDuplicateJSONFields(raw) != nil {
+				return nil, app_errors.ErrValidation
+			}
+			var value any
+			if key == requestredact.SettingKey {
+				decoded, err := requestredact.Decode(raw)
+				if err != nil {
+					return nil, app_errors.ErrValidation
+				}
+				issues := requestredact.Validate(decoded)
+				for _, issue := range issues {
+					if issue.Error != "" {
+						return nil, app_errors.NewAPIErrorWithData(app_errors.ErrValidation, map[string]any{"request_redaction": issues})
+					}
+				}
+				value = decoded
+			} else if key == jev.SettingKey {
+				decoded, err := jev.Decode(raw)
+				if err != nil {
+					return nil, app_errors.ErrValidation
+				}
+				value = decoded
+			} else {
+				decoded, err := requestaudit.Decode(raw)
+				if err != nil {
+					return nil, app_errors.ErrValidation
+				}
+				value = decoded
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, app_errors.ErrInternalServer
+			}
+			ciphertext, err := encryptionService.Encrypt(string(encoded))
+			if err != nil {
+				return nil, app_errors.ErrInternalServer
+			}
+			updates = append(updates, persistedSettingUpdate{key: key, value: &ciphertext})
+			continue
+		}
+		if key == outboundproxy.SystemSettingKey {
+			config, err := outboundproxy.Decode(string(raw))
+			if err != nil || config.Mode == outboundproxy.ModeInherit || encryptionService == nil {
+				return nil, app_errors.ErrValidation
+			}
+			encoded, err := outboundproxy.Encode(config)
+			if err != nil {
+				return nil, app_errors.ErrValidation
+			}
+			ciphertext, err := encryptionService.Encrypt(encoded)
+			if err != nil {
+				return nil, app_errors.ErrInternalServer
+			}
+			updates = append(updates, persistedSettingUpdate{key: key, value: &ciphertext})
+			continue
+		}
+		value, err := decodeSettingValue(raw)
+		if err != nil {
+			return nil, app_errors.ErrValidation
+		}
+		if err := state.ValidateRuntimeSetting(key, value); err != nil {
+			return nil, app_errors.ErrValidation
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, app_errors.ErrValidation
+		}
+		text := string(encoded)
+		updates = append(updates, persistedSettingUpdate{key: key, value: &text})
+	}
+	return updates, nil
+}
+
+func settingRequestContains(request SettingsUpdateRequest, key string) bool {
+	_, exists := request.Settings[key]
+	return exists
+}
+
+func decodeSettingValue(raw []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("multiple JSON values")
+		}
+		return nil, err
+	}
+	return value, nil
+}
+
+func mapSettingsResponse(
+	snapshot *state.ConfigSnapshot,
+	rows []models.SystemSetting,
+	modelsDevAutoSyncOverride *bool,
+	encryptionService encryption.Service,
+	environmentProxy *outboundproxy.Config,
+	catalogs ...stateloader.ProxyCatalog,
+) (SettingsResponse, error) {
+	settings := snapshot.Settings
+	set := make(map[string]string, len(settings.HeaderRules.Set))
+	for name, value := range settings.HeaderRules.Set {
+		set[name] = value
+	}
+	remove := append([]string{}, settings.HeaderRules.Remove...)
+	responseSet := make(map[string]string, len(settings.ResponseHeaderRules.Set))
+	for name, value := range settings.ResponseHeaderRules.Set {
+		responseSet[name] = value
+	}
+	responseRemove := append([]string{}, settings.ResponseHeaderRules.Remove...)
+	overrides := make([]string, 0, len(rows))
+	var configuredProxy *outboundproxy.Config
+	for _, row := range rows {
+		if row.Key == requestredact.SettingKey || state.IsRuntimeSettingKey(row.Key) || row.Key == automodel.SettingKey || row.Key == jev.SettingKey || row.Key == requestaudit.SettingKey {
+			overrides = append(overrides, row.Key)
+		}
+		if row.Key == outboundproxy.SystemSettingKey {
+			if encryptionService == nil {
+				return SettingsResponse{}, app_errors.ErrInternalServer
+			}
+			plaintext, err := encryptionService.Decrypt(row.Value)
+			if err != nil {
+				return SettingsResponse{}, app_errors.ErrInternalServer
+			}
+			config, err := outboundproxy.Decode(plaintext)
+			if err != nil || config.Mode == outboundproxy.ModeInherit {
+				return SettingsResponse{}, app_errors.ErrInternalServer
+			}
+			plaintext = ""
+			configuredProxy = &config
+		}
+	}
+	catalog := stateloader.ProxyCatalog{}
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
+	effectiveProxy, err := outboundproxy.Resolve(nil, nil, catalog.Resolve(configuredProxy), environmentProxy)
+	if err != nil {
+		return SettingsResponse{}, app_errors.ErrInternalServer
+	}
+	proxyView, err := outboundproxy.NewView(configuredProxy, effectiveProxy)
+	if err != nil {
+		return SettingsResponse{}, app_errors.ErrInternalServer
+	}
+	proxyView = catalog.Annotate(proxyView, configuredProxy)
+	readOnly := make([]string, 0)
+	modelsDevAutoSyncEnabled := settings.ModelsDevAutoSyncEnabled
+	if modelsDevAutoSyncOverride != nil {
+		modelsDevAutoSyncEnabled = *modelsDevAutoSyncOverride
+		readOnly = append(readOnly, state.SettingModelsDevAutoSyncEnabled)
+	}
+	return SettingsResponse{
+		RequestAuditPreset: requestaudit.DefaultConfig(),
+		AutoModelTemplate:  automodel.Template(),
+		DecisionRoutes:     decisionRouteOptions(snapshot), AuditAccessKeys: auditAccessKeyOptions(snapshot),
+		DecisionModels: decisionModelNames(snapshot),
+		Revision:       snapshot.Revision,
+		Values: SettingsValuesResponse{
+			ErrorRules:       settings.ErrorRules.Rules(),
+			RequestRedaction: snapshot.RequestRedaction.Rules(),
+			AutoModel:        newAutoModelSettingsView(snapshot.AutoModels),
+			Jev:              snapshot.Jev, RequestAudit: snapshot.RequestAudit,
+			FirstByteTimeout:  durationSeconds(settings.FirstByteTimeout),
+			RequestTimeout:    durationSeconds(settings.RequestTimeout),
+			StreamIdleTimeout: durationSeconds(settings.StreamIdleTimeout),
+			HeaderRules: HeaderRulesResponse{
+				Set:    set,
+				Remove: remove,
+			},
+			CORS: CORSConfigResponse{
+				Enabled:          settings.CORS.Enabled,
+				AllowedOrigins:   append([]string{}, settings.CORS.AllowedOrigins...),
+				AllowedMethods:   append([]string{}, settings.CORS.AllowedMethods...),
+				AllowedHeaders:   append([]string{}, settings.CORS.AllowedHeaders...),
+				ExposedHeaders:   append([]string{}, settings.CORS.ExposedHeaders...),
+				AllowCredentials: settings.CORS.AllowCredentials,
+				MaxAge:           settings.CORS.MaxAgeSeconds,
+			},
+			ResponseHeaderRules: HeaderRulesResponse{
+				Set:    responseSet,
+				Remove: responseRemove,
+			},
+			RetryCount:                       settings.RetryCount,
+			RouteStrategy:                    settings.RouteStrategy,
+			BlacklistThreshold:               settings.BlacklistThreshold,
+			AffinityEnabled:                  settings.AffinityEnabled,
+			CodexLiveMode:                    settings.CodexLiveMode,
+			ResponsesWebsocketEnabled:        settings.ResponsesWebsocketEnabled,
+			EmptyResponseRetry:               settings.EmptyResponseRetry,
+			GlobalConcurrencyLimit:           settings.GlobalConcurrencyLimit,
+			DefaultAccessKeyConcurrencyLimit: settings.DefaultAccessKeyConcurrencyLimit,
+			DefaultGroupConcurrencyLimit:     settings.DefaultGroupConcurrencyLimit,
+			AffinityTTL:                      durationSeconds(settings.AffinityTTL),
+			AffinityCapacity:                 settings.AffinityCapacity,
+			ValidationInterval:               durationSeconds(settings.ValidationInterval),
+			RequestLogRetentionDays:          settings.RequestLogRetentionDays,
+			ModelsDevAutoSyncEnabled:         modelsDevAutoSyncEnabled,
+			ProxyConfig:                      proxyView,
+		},
+		Overrides: overrides,
+		ReadOnly:  readOnly,
+	}, nil
+}
+
+func decisionModelNames(snapshot *state.ConfigSnapshot) []string {
+	if snapshot == nil {
+		return []string{}
+	}
+	byOperation := snapshot.ExecutionCandidates[protocol.Decisions]
+	byModel := byOperation[execution.OperationDecisionsCreate]
+	names := make([]string, 0, len(byModel))
+	for name, targets := range byModel {
+		if strings.TrimSpace(name) != "" && len(targets) > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func durationSeconds(value time.Duration) int64 {
+	return int64(value / time.Second)
+}

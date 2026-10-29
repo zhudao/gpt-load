@@ -1,22 +1,63 @@
-# 默认目标
 .DEFAULT_GOAL := help
 
-# ==============================================================================
-# 运行与开发
-# ==============================================================================
-.PHONY: run
-run: ## 构建前端并运行服务器
-	@echo "--- Building frontend... ---"
-	cd web && npm install && npm run build
-	@echo "--- Preparing backend... ---"
-	@echo "--- Starting backend... ---"
-	go run ./main.go
+APP := gpt-load
+WEB_DIR := web
+GO ?= go
+PNPM ?= corepack pnpm
+
+.PHONY: _web-deps
+_web-deps:
+	$(PNPM) --dir $(WEB_DIR) install --frozen-lockfile
+
+.PHONY: _web-build
+_web-build: _web-deps
+	$(PNPM) --dir $(WEB_DIR) run build
 
 .PHONY: dev
-dev: ## 以开发模式运行（带竞态检测）
-	@echo "🔧 开发模式启动..."
-	go run -race ./main.go
+dev: _web-build ## Build the Web UI and run with race detection
+	$(GO) run -race .
+
+.PHONY: run
+run: _web-build ## Build the Web UI and run the application
+	$(GO) run .
+
+.PHONY: build
+build: _web-build ## Build the Web UI and application binary
+	$(GO) build -o $(APP) .
+
+.PHONY: test
+test: ## Run Go unit tests
+	$(GO) test -count=1 . ./internal/...
+
+# Go 与前端检查并行；vite build 会清空 internal/webui/dist，必须等 Go 编译结束后再执行。
+.PHONY: check
+check: _web-deps ## Run source checks and build
+	@$(MAKE) --no-print-directory -j2 _check-go _check-web
+	$(PNPM) --dir $(WEB_DIR) exec vite build
+	$(GO) build -o $(APP) .
+	git --no-pager diff --check
+
+.PHONY: _check-go
+_check-go:
+	@go_root="$$($(GO) env GOROOT)"; formatted_files="$$("$${go_root}/bin/gofmt" -l .)"; test -z "$${formatted_files}"
+	$(GO) mod tidy -diff
+	$(GO) vet ./...
+	$(GO) test -count=1 . ./internal/...
+
+.PHONY: _check-web
+_check-web:
+	$(PNPM) --dir $(WEB_DIR) run lint
+	$(PNPM) --dir $(WEB_DIR) run format
+	$(PNPM) --dir $(WEB_DIR) run type-check
+
+.PHONY: release
+release: ## Validate latest main and ask before pushing one release tag
+	python3 -m scripts.release
+
+.PHONY: release-simulate
+release-simulate: ## Rehearse acceptance on committed HEAD without creating a tag
+	python3 -m scripts.release --simulate
 
 .PHONY: help
-help: ## 显示此帮助信息
-	@awk 'BEGIN {FS = ":.*?## "; printf "Usage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*?## / { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+help: ## Display available targets
+	@awk 'BEGIN {FS = ":.*?## "; printf "Usage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*?## / { printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

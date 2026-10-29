@@ -1,0 +1,81 @@
+package channel
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"strings"
+	"testing"
+
+	"gpt-load/internal/execution"
+	"gpt-load/internal/protocol"
+)
+
+// TestBuiltInRouteGolden freezes the explicit built-in route contract. It is
+// based on the pre-module behavior with the intentionally unreachable
+// OpenAI Responses model-list routes removed.
+func TestBuiltInRouteGolden(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	got := make([]string, 0)
+	for _, descriptor := range registry.List() {
+		definition, ok := registry.lookup(descriptor.ID)
+		if !ok {
+			t.Fatalf("lookup(%q) missing", descriptor.ID)
+		}
+		for _, clientProtocol := range protocol.DataPlaneProtocols() {
+			for _, operation := range allGoldenOperations() {
+				mode, exists := definition.modes[clientProtocol][operation]
+				if !exists {
+					continue
+				}
+				got = append(got, fmt.Sprintf(
+					"%s|%s|%s|%s",
+					descriptor.ID,
+					clientProtocol,
+					operation,
+					mode,
+				))
+			}
+		}
+	}
+
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(got, "\n"))))
+	const wantDigest = "9a4053d8ddce43454a45353f9fe1ac3b309767c09e5f7864895a97c9947c82c5"
+	if digest != wantDigest {
+		t.Fatalf("built-in routes changed: digest = %s, want %s\n%s", digest, wantDigest, strings.Join(got, "\n"))
+	}
+}
+
+func allGoldenOperations() []execution.Operation {
+	return []execution.Operation{
+		execution.OperationChatCompletion,
+		execution.OperationResponsesCreate,
+		execution.OperationResponsesRetrieve,
+		execution.OperationResponsesDelete,
+		execution.OperationResponsesCancel,
+		execution.OperationResponsesInputItems,
+		execution.OperationResponsesCompact,
+		execution.OperationResponsesInputTokens,
+		execution.OperationCountTokens,
+		execution.OperationResponsesPassthrough,
+		execution.OperationWebSearch,
+		execution.OperationImagesGenerate,
+		execution.OperationImagesEdit,
+		execution.OperationEmbeddingsCreate,
+		execution.OperationLiveCall,
+		execution.OperationRerank,
+		execution.OperationDecisionsCreate,
+		execution.OperationMistralOCR,
+		execution.OperationMistralFIM,
+		execution.OperationMistralAudioTranscription,
+		execution.OperationAudioSpeech,
+		execution.OperationMistralModeration,
+		execution.OperationMistralChatModeration,
+		execution.OperationMistralClassification,
+		execution.OperationMistralVoices,
+		execution.OperationMistralRealtimeTranscription,
+		execution.OperationListModels,
+		execution.OperationProbe,
+	}
+}

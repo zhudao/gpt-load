@@ -1,0 +1,284 @@
+package storage
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"gorm.io/gorm"
+
+	migrationfiles "gpt-load/internal/storage/migrations"
+)
+
+const (
+	migrationLedgerTable       = "schema_migrations"
+	initialSchemaSentinelTable = "groups"
+)
+
+var migrationIDPattern = regexp.MustCompile(`^(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*$`)
+
+type schemaMigration struct {
+	ID string `gorm:"column:id;type:varchar(255);primaryKey;not null"`
+}
+
+func (schemaMigration) TableName() string {
+	return migrationLedgerTable
+}
+
+type migration struct {
+	ID                  string
+	Up                  func(*gorm.DB) error
+	Validate            func(*gorm.DB) error
+	ValidateCurrent     func(*gorm.DB) error
+	ValidateRecoverable func(*gorm.DB) error
+}
+
+var migrations = []migration{
+	{
+		ID:                  migrationfiles.ID0001,
+		Up:                  migrationfiles.Up0001,
+		Validate:            migrationfiles.Validate0001,
+		ValidateCurrent:     migrationfiles.ValidateCurrent0001,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0001,
+	},
+	{
+		ID:                  migrationfiles.ID0002,
+		Up:                  migrationfiles.Up0002,
+		Validate:            migrationfiles.Validate0002,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0002,
+	},
+	{
+		ID:                  migrationfiles.ID0003,
+		Up:                  migrationfiles.Up0003,
+		Validate:            migrationfiles.Validate0003,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0003,
+	},
+	{
+		ID:                  migrationfiles.ID0004,
+		Up:                  migrationfiles.Up0004,
+		Validate:            migrationfiles.Validate0004,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0004,
+	},
+	{
+		ID:                  migrationfiles.ID0005,
+		Up:                  migrationfiles.Up0005,
+		Validate:            migrationfiles.Validate0005,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0005,
+	},
+	{
+		ID:                  migrationfiles.ID0006,
+		Up:                  migrationfiles.Up0006,
+		Validate:            migrationfiles.Validate0006,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0006,
+	},
+	{
+		ID:                  migrationfiles.ID0007,
+		Up:                  migrationfiles.Up0007,
+		Validate:            migrationfiles.Validate0007,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0007,
+	},
+	{
+		ID:                  migrationfiles.ID0008,
+		Up:                  migrationfiles.Up0008,
+		Validate:            migrationfiles.Validate0008,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0008,
+	},
+	{
+		ID:                  migrationfiles.ID0009,
+		Up:                  migrationfiles.Up0009,
+		Validate:            migrationfiles.Validate0009,
+		ValidateRecoverable: migrationfiles.ValidateRecoverable0009,
+	},
+	{
+		ID: migrationfiles.ID0010, Up: migrationfiles.Up0010,
+		Validate: migrationfiles.Validate0010, ValidateRecoverable: migrationfiles.ValidateRecoverable0010,
+	},
+	{
+		ID: migrationfiles.ID0011, Up: migrationfiles.Up0011,
+		Validate: migrationfiles.Validate0011, ValidateRecoverable: migrationfiles.ValidateRecoverable0011,
+	},
+	{
+		ID: migrationfiles.ID0012, Up: migrationfiles.Up0012,
+		Validate: migrationfiles.Validate0012, ValidateRecoverable: migrationfiles.ValidateRecoverable0012,
+	},
+	{ID: migrationfiles.ID0013, Up: migrationfiles.Up0013, Validate: migrationfiles.Validate0013, ValidateRecoverable: migrationfiles.ValidateRecoverable0013},
+	{ID: migrationfiles.ID0014, Up: migrationfiles.Up0014, Validate: migrationfiles.Validate0014, ValidateRecoverable: migrationfiles.ValidateRecoverable0014},
+	{ID: migrationfiles.ID0015, Up: migrationfiles.Up0015, Validate: migrationfiles.Validate0015, ValidateRecoverable: migrationfiles.ValidateRecoverable0015},
+	{ID: migrationfiles.ID0016, Up: migrationfiles.Up0016, Validate: migrationfiles.Validate0016, ValidateRecoverable: migrationfiles.ValidateRecoverable0016},
+	{ID: migrationfiles.ID0017, Up: migrationfiles.Up0017, Validate: migrationfiles.Validate0017, ValidateRecoverable: migrationfiles.ValidateRecoverable0017},
+	{ID: migrationfiles.ID0018, Up: migrationfiles.Up0018, Validate: migrationfiles.Validate0018, ValidateRecoverable: migrationfiles.ValidateRecoverable0018},
+	{ID: migrationfiles.ID0019, Up: migrationfiles.Up0019, Validate: migrationfiles.Validate0019, ValidateRecoverable: migrationfiles.ValidateRecoverable0019},
+	{ID: migrationfiles.ID0020, Up: migrationfiles.Up0020, Validate: migrationfiles.Validate0020, ValidateRecoverable: migrationfiles.ValidateRecoverable0020},
+	{ID: migrationfiles.ID0021, Up: migrationfiles.Up0021, Validate: migrationfiles.Validate0021, ValidateRecoverable: migrationfiles.ValidateRecoverable0021},
+	{ID: migrationfiles.ID0022, Up: migrationfiles.Up0022, Validate: migrationfiles.Validate0022, ValidateRecoverable: migrationfiles.ValidateRecoverable0022},
+	{ID: migrationfiles.ID0023, Up: migrationfiles.Up0023, Validate: migrationfiles.Validate0023, ValidateRecoverable: migrationfiles.ValidateRecoverable0023},
+	{ID: migrationfiles.ID0024, Up: migrationfiles.Up0024, Validate: migrationfiles.Validate0024, ValidateCurrent: migrationfiles.ValidateCurrent0024, ValidateRecoverable: migrationfiles.ValidateRecoverable0024},
+	{ID: migrationfiles.ID0025, Up: migrationfiles.Up0025, Validate: migrationfiles.Validate0025, ValidateRecoverable: migrationfiles.ValidateRecoverable0025},
+	{ID: migrationfiles.ID0026, Up: migrationfiles.Up0026, Validate: migrationfiles.Validate0026, ValidateRecoverable: migrationfiles.ValidateRecoverable0026},
+	{ID: migrationfiles.ID0027, Up: migrationfiles.Up0027, Validate: migrationfiles.Validate0027, ValidateRecoverable: migrationfiles.ValidateRecoverable0027},
+	{ID: migrationfiles.ID0028, Up: migrationfiles.Up0028, Validate: migrationfiles.Validate0028, ValidateRecoverable: migrationfiles.ValidateRecoverable0028},
+	{ID: migrationfiles.ID0029, Up: migrationfiles.Up0029, Validate: migrationfiles.Validate0029, ValidateRecoverable: migrationfiles.ValidateRecoverable0029},
+	{ID: migrationfiles.ID0030, Up: migrationfiles.Up0030, Validate: migrationfiles.Validate0030, ValidateRecoverable: migrationfiles.ValidateRecoverable0030},
+	{ID: migrationfiles.ID0031, Up: migrationfiles.Up0031, Validate: migrationfiles.Validate0031, ValidateRecoverable: migrationfiles.ValidateRecoverable0031},
+}
+
+func applyMigrations(db *gorm.DB) error {
+	return applyMigrationRegistry(db, migrations)
+}
+
+func applyMigrationRegistry(db *gorm.DB, entries []migration) error {
+	if db == nil {
+		return fmt.Errorf("apply migrations: db is nil")
+	}
+	if db.Dialector == nil {
+		return fmt.Errorf("apply migrations: database dialector is nil")
+	}
+	if err := validateMigrationRegistry(entries); err != nil {
+		return err
+	}
+
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "sqlite":
+		return applySQLiteMigrationRegistry(db, entries)
+	case "mysql", "postgres", "postgresql":
+		return db.Connection(func(connection *gorm.DB) error {
+			if err := acquireMigrationLock(connection); err != nil {
+				return err
+			}
+			// Raw lock acquisition and Scan may populate GORM's statement schema
+			// with the scalar result type. Start fresh sessions for migration and
+			// release so that state cannot leak into the schema/table operations.
+			operationErr := applyMigrationsLocked(
+				connection.Session(&gorm.Session{NewDB: true}),
+				entries,
+				true,
+			)
+			releaseErr := releaseMigrationLock(connection.Session(&gorm.Session{NewDB: true}))
+			return errors.Join(operationErr, releaseErr)
+		})
+	default:
+		return fmt.Errorf("apply migrations: unsupported database driver %q", db.Dialector.Name())
+	}
+}
+
+func validateMigrationRegistry(entries []migration) error {
+	for index, entry := range entries {
+		position := index + 1
+		matches := migrationIDPattern.FindStringSubmatch(entry.ID)
+		if len(matches) != 2 {
+			return fmt.Errorf("migration registry entry %d has invalid ID %q", position, entry.ID)
+		}
+		number, err := strconv.Atoi(matches[1])
+		if err != nil || number != position {
+			return fmt.Errorf(
+				"migration registry entry %d has non-contiguous ID %q",
+				position,
+				entry.ID,
+			)
+		}
+		if entry.Up == nil || entry.Validate == nil || entry.ValidateRecoverable == nil {
+			return fmt.Errorf("migration registry entry %d (%s) is incomplete", position, entry.ID)
+		}
+	}
+	return nil
+}
+
+func applyMigrationsLocked(db *gorm.DB, entries []migration, useMigrationTransactions bool) error {
+	hadMigrationLedger, err := migrationTableExists(db, migrationLedgerTable)
+	if err != nil {
+		return fmt.Errorf("inspect schema_migrations: %w", err)
+	}
+	if !hadMigrationLedger {
+		hadInitialSchema, err := migrationTableExists(db, initialSchemaSentinelTable)
+		if err != nil {
+			return fmt.Errorf("inspect initial schema: %w", err)
+		}
+		if hadInitialSchema {
+			return fmt.Errorf(
+				"initialize database schema: %s table already exists",
+				initialSchemaSentinelTable,
+			)
+		}
+		if err := db.AutoMigrate(&schemaMigration{}); err != nil {
+			return fmt.Errorf("create schema_migrations: %w", err)
+		}
+	}
+
+	var applied []string
+	if err := db.Table(migrationLedgerTable).Order("id ASC").Pluck("id", &applied).Error; err != nil {
+		return fmt.Errorf("read schema_migrations: %w", err)
+	}
+	if len(applied) > 0 {
+		lastIndex := len(applied) - 1
+		if lastIndex < len(entries) &&
+			applied[lastIndex] == migrationResumeMarker(entries[lastIndex].ID) {
+			applied = applied[:lastIndex]
+		}
+	}
+	for index, id := range applied {
+		if index >= len(entries) || entries[index].ID != id {
+			return fmt.Errorf("schema_migrations contains unknown or non-contiguous migration %q", id)
+		}
+	}
+	if len(applied) > 0 {
+		inspection, err := newMigrationInspection(db)
+		if err != nil {
+			return err
+		}
+		for index, id := range applied {
+			validator := entries[index].Validate
+			if entries[index].ValidateCurrent != nil {
+				validator = entries[index].ValidateCurrent
+			}
+			if err := inspection.validate(validator); err != nil {
+				return fmt.Errorf("validate applied migration %s: %w", id, err)
+			}
+		}
+	}
+
+	for _, entry := range entries[len(applied):] {
+		if err := applyMigration(db, entry, useMigrationTransactions); err != nil {
+			return err
+		}
+	}
+	return validateMigrationForeignKeys(db)
+}
+
+func applyMigration(db *gorm.DB, entry migration, useMigrationTransactions bool) error {
+	if strings.EqualFold(db.Dialector.Name(), "mysql") {
+		return applyMySQLMigration(db, entry)
+	}
+	apply := func(tx *gorm.DB) error {
+		if err := entry.Up(tx); err != nil {
+			return fmt.Errorf("apply migration %s: %w", entry.ID, err)
+		}
+		if entry.Validate != nil {
+			if err := validateMigrationAfterDDL(tx, entry.Validate); err != nil {
+				return fmt.Errorf("validate migration %s: %w", entry.ID, err)
+			}
+		}
+		if err := tx.Create(&schemaMigration{ID: entry.ID}).Error; err != nil {
+			return fmt.Errorf("record migration %s: %w", entry.ID, err)
+		}
+		return nil
+	}
+
+	// MySQL DDL implicitly commits. Running the DDL and ledger insert in a
+	// GORM transaction would therefore make the final Commit fail with an
+	// already-committed transaction. PostgreSQL and SQLite retain transactional
+	// DDL, so preserve their all-or-nothing migration behavior.
+	if !useMigrationTransactions || strings.EqualFold(db.Dialector.Name(), "mysql") {
+		return apply(db)
+	}
+	if err := db.Transaction(apply); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AutoMigrate applies every pending migration before the application starts.
+func AutoMigrate(db *gorm.DB) error {
+	return applyMigrations(db)
+}

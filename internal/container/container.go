@@ -1,104 +1,382 @@
-// Package container provides a dependency injection container for the application.
+// Package container assembles the 2.0 dependency graph with dig.
 package container
 
 import (
-	"gpt-load/internal/app"
-	"gpt-load/internal/channel"
-	"gpt-load/internal/config"
-	"gpt-load/internal/db"
-	"gpt-load/internal/handler"
-	"gpt-load/internal/httpclient"
-	"gpt-load/internal/keypool"
-	"gpt-load/internal/proxy"
-	"gpt-load/internal/router"
-	"gpt-load/internal/services"
-	"gpt-load/internal/store"
+	"fmt"
+	"net/http"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 	"go.uber.org/dig"
+	"gorm.io/gorm"
+
+	"gpt-load/internal/accessquota"
+	"gpt-load/internal/app"
+	"gpt-load/internal/catalog"
+	"gpt-load/internal/channel"
+	"gpt-load/internal/control"
+	"gpt-load/internal/dialect"
+	"gpt-load/internal/execution"
+	bifrostexecutor "gpt-load/internal/execution/bifrost"
+	cpaexecutor "gpt-load/internal/execution/cpa"
+	"gpt-load/internal/gateway"
+	"gpt-load/internal/health"
+	"gpt-load/internal/httplifecycle"
+	"gpt-load/internal/outboundproxy"
+	"gpt-load/internal/platform/config"
+	"gpt-load/internal/platform/encryption"
+	"gpt-load/internal/platform/httpclient"
+	"gpt-load/internal/platform/httproute"
+	"gpt-load/internal/platform/memlimit"
+	"gpt-load/internal/platform/redact"
+	"gpt-load/internal/pricing"
+	"gpt-load/internal/provideradapter"
+	"gpt-load/internal/ratelimit"
+	"gpt-load/internal/releasecheck"
+	"gpt-load/internal/requestlog"
+	"gpt-load/internal/rpm"
+	"gpt-load/internal/state"
+	stateloader "gpt-load/internal/state/loader"
+	"gpt-load/internal/storage"
+	"gpt-load/internal/subscription"
+	subscriptionproviders "gpt-load/internal/subscription/providers"
+	subscriptionruntime "gpt-load/internal/subscription/runtime"
+	"gpt-load/internal/telemetry"
+	"gpt-load/internal/webui"
 )
 
-// BuildContainer creates a new dependency injection container and provides all the application's services.
+// BuildContainer creates the 2.0 runtime foundation dependency graph.
 func BuildContainer() (*dig.Container, error) {
-	container := dig.New()
+	dependencyContainer := dig.New()
 
-	// Infrastructure Services
-	if err := container.Provide(config.NewManager); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(db.NewDB); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(config.NewSystemSettingsManager); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(store.NewStore); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(httpclient.NewHTTPClientManager); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(channel.NewFactory); err != nil {
-		return nil, err
+	providers := []any{
+		config.Load,
+		memlimit.Detect,
+		func(cfg *config.Config) (encryption.Service, error) {
+			return encryption.NewServiceWithKeyFile(cfg.EncryptionKey, cfg.DataDir)
+		},
+		func(cfg *config.Config) (*gorm.DB, error) {
+			db, err := storage.OpenConfigured(cfg)
+			if err == nil {
+				logrus.WithField("event", "startup.database_open").Info("database opened")
+			}
+			return db, err
+		},
+		httplifecycle.NewCoordinator,
+		app.NewEngineWithLifecycle,
+		webui.NewServer,
+		state.NewCredentialRegistry,
+		state.NewResponseBindings,
+		accessquota.NewRuntime,
+		channel.CompileRegistry,
+		control.NewPriceRuntime,
+		control.NewCatalogBootstrap,
+		func(bootstrap *control.CatalogBootstrap) *catalog.Runtime { return bootstrap.Runtime },
+		health.NewStatsStore,
+		health.NewMutationCoordinator,
+		rpm.NewStore,
+		func(store *rpm.Store) *ratelimit.AccessKeyRPM {
+			limiter := ratelimit.NewAccessKeyRPM()
+			limiter.SetRPMStore(store)
+			return limiter
+		},
+		func(handler *gateway.Handler) app.LiveSessionRuntime { return handler },
+		func(limiter *ratelimit.AccessKeyRPM) gateway.AccessKeyRPMLimiter {
+			return limiter
+		},
+		func(manager *state.Manager) requestlog.RetentionPolicyProvider {
+			return retentionSnapshotProvider{manager: manager}
+		},
+		func(runtime *control.PriceRuntime) gateway.PriceTableProvider {
+			return priceRuntimeProvider{runtime: runtime}
+		},
+		func(
+			db *gorm.DB,
+			redactor *redact.Redactor,
+			retention requestlog.RetentionPolicyProvider,
+			quotaRuntime *accessquota.Runtime,
+			subscriptionCredentials *subscription.CredentialManager,
+			rpmStore *rpm.Store,
+		) *requestlog.Service {
+			service := requestlog.NewService(db, redactor, retention, quotaRuntime)
+			service.SetPassiveQuotaFlusher(subscriptionCredentials)
+			service.SetRPMStore(rpmStore)
+			return service
+		},
+		func(service *requestlog.Service) telemetry.RequestLogSink {
+			return service
+		},
+		func(service *requestlog.Service) gateway.AccessKeyUsageReader {
+			return service
+		},
+		func(service *requestlog.Service) control.RequestLogReader {
+			return service
+		},
+		func(service *requestlog.Service) control.UsageStatReader {
+			return service
+		},
+		func(service *requestlog.Service) control.HomeStatisticsReader {
+			return service
+		},
+		func(service *requestlog.Service) control.RequestLogStatsReader {
+			return service
+		},
+		func(service *requestlog.Service) control.RequestLogCleaner {
+			return service
+		},
+		func(service *requestlog.Service) app.RequestLogRuntime {
+			return service
+		},
+		func(
+			cfg *config.Config,
+			registry *state.CredentialRegistry,
+			stats *health.StatsStore,
+			responseBindings *state.ResponseBindings,
+		) app.RuntimeStateCheckpoint {
+			return app.NewFileRuntimeStateCheckpoint(cfg.DataDir, registry, stats, responseBindings)
+		},
+		control.NewRuntime,
+		func(runtime *control.Runtime) app.ControlRuntime { return runtime },
+		httpclient.NewHTTPClientManager,
+		newSystemOutboundProxyProvider,
+		releasecheck.NewClient,
+		releasecheck.NewChecker,
+		func(
+			manager *httpclient.HTTPClientManager,
+			proxyProvider httpclient.OutboundProxyProvider,
+		) *catalog.Client {
+			return catalog.NewClient(manager, proxyProvider)
+		},
+		redact.New,
+		func(manager *httpclient.HTTPClientManager) *http.Client {
+			return manager.GetClient(&httpclient.Config{
+				ConnectTimeout:        15 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   20,
+				ResponseHeaderTimeout: 120 * time.Second,
+				DisableCompression:    true,
+				WriteBufferSize:       32 * 1024,
+				ReadBufferSize:        32 * 1024,
+				ForceAttemptHTTP2:     true,
+				TLSHandshakeTimeout:   15 * time.Second,
+				ExpectContinueTimeout: time.Second,
+			})
+		},
+		dialect.NewOpenAI,
+		dialect.NewOpenAIResponses,
+		dialect.NewOpenAIImages,
+		dialect.NewOpenAIEmbeddings,
+		dialect.NewRerank,
+		dialect.NewDecisions,
+		dialect.NewAnthropic,
+		dialect.NewGemini,
+		dialect.NewGeminiEmbeddings,
+		dialect.NewAudioSpeech,
+		dialect.NewMistral,
+		func(
+			openAI *dialect.OpenAI,
+			openAIResponses *dialect.OpenAIResponses,
+			openAIImages *dialect.OpenAIImages,
+			openAIEmbeddings *dialect.OpenAIEmbeddings,
+			rerank *dialect.Rerank,
+			decisions *dialect.Decisions,
+			anthropic *dialect.Anthropic,
+			gemini *dialect.Gemini,
+			geminiEmbeddings *dialect.GeminiEmbeddings,
+			audioSpeech *dialect.AudioSpeech,
+			mistral *dialect.Mistral,
+		) dialect.Set {
+			return dialect.NewSet(
+				openAI, openAIResponses, openAIImages, openAIEmbeddings, rerank, decisions, anthropic, gemini, geminiEmbeddings,
+				audioSpeech, mistral,
+			)
+		},
+		func(registry *channel.Registry) (*bifrostexecutor.RuntimeManager, error) {
+			return bifrostexecutor.NewManagedRuntime(registry)
+		},
+		func(adapters *provideradapter.Registry, quotaRuntime *accessquota.Runtime, credentials *state.CredentialRegistry) *state.Manager {
+			manager := state.NewManager()
+			manager.SetSchedulingState(credentials.SchedulingState())
+			manager.SetSnapshotReconciler(runtimeSnapshotReconciler{
+				adapters: adapters, accessQuota: quotaRuntime,
+			})
+			return manager
+		},
+		newSubscriptionRuntime,
+		subscription.NewCredentialManager,
+		cpaexecutor.NewAdapter,
+		subscriptionproviders.NewModelCatalogUpdater,
+		newProviderAdapterRegistry,
+		func(registry *provideradapter.Registry) execution.Executor { return registry },
+		func(runtime *bifrostexecutor.RuntimeManager) app.ExecutionRuntime { return runtime },
+		func(executor execution.Executor, store *rpm.Store) *gateway.ExecutionForwarder {
+			forwarder := gateway.NewExecutionForwarder(executor)
+			forwarder.SetRPMStore(store)
+			return forwarder
+		},
+		func(forwarder *gateway.ExecutionForwarder) gateway.AttemptForwarder { return forwarder },
+		gateway.NewHandlerWithLifecycle,
+		control.NewService,
+		control.NewCatalogSyncCoordinator,
+		func(service *control.Service) app.StartupBootstrap { return service },
+		func(service *control.Service) app.StartupRecovery { return service },
+		func(
+			cfg *config.Config,
+			service *control.Service,
+			checker *releasecheck.Checker,
+		) *control.Server {
+			return control.NewServerWithReleaseUpdateChecker(cfg, service, checker)
+		},
+		newHTTPRegistry,
+		func(
+			db *gorm.DB,
+			manager *state.Manager,
+			registry *state.CredentialRegistry,
+			channelRegistry *channel.Registry,
+			subscriptions *subscriptionruntime.Runtime,
+			encryptionService encryption.Service,
+			quotaRuntime *accessquota.Runtime,
+		) app.RuntimeStateLoader {
+			return stateloader.NewWithCredentialValidation(
+				db,
+				manager,
+				registry,
+				channelRegistry,
+				subscriptions,
+				encryptionService,
+				quotaRuntime,
+			)
+		},
+		app.NewApp,
 	}
 
-	// Business Services
-	if err := container.Provide(services.NewTaskService); err != nil {
+	for _, provider := range providers {
+		if err := dependencyContainer.Provide(provider); err != nil {
+			return nil, err
+		}
+	}
+	if err := dependencyContainer.Decorate(func(
+		handler *gateway.Handler,
+		adapter *cpaexecutor.Adapter,
+		cfg *config.Config,
+		memory memlimit.Memory,
+	) *gateway.Handler {
+		handler.ConfigureCodexLive(adapter, cfg.CodexLive)
+		handler.ConfigureRequestBodyLimit(memory)
+		return handler
+	}); err != nil {
 		return nil, err
 	}
-	if err := container.Provide(services.NewKeyManualValidationService); err != nil {
-		return nil, err
+	if err := dependencyContainer.Invoke(func(
+		engine *gin.Engine,
+		registry *httproute.Registry,
+		gatewayHandler *gateway.Handler,
+	) error {
+		engine.Use(gatewayHandler.DownstreamHeadersMiddleware())
+		return registry.Bind(engine)
+	}); err != nil {
+		return nil, fmt.Errorf("register HTTP routes: %w", err)
 	}
-	if err := container.Provide(services.NewKeyService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewKeyImportService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewKeyDeleteService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewLogService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewLogCleanupService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewRequestLogService); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(services.NewGroupManager); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(keypool.NewProvider); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(keypool.NewKeyValidator); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(keypool.NewCronChecker); err != nil {
-		return nil, err
-	}
+	return dependencyContainer, nil
+}
 
-	// Handlers
-	if err := container.Provide(handler.NewServer); err != nil {
-		return nil, err
+func newSystemOutboundProxyProvider(manager *state.Manager) httpclient.OutboundProxyProvider {
+	fallback, err := outboundproxy.Resolve(nil, nil, nil, outboundproxy.Environment())
+	if err != nil {
+		fallback = outboundproxy.Effective{
+			Config: outboundproxy.Config{Mode: outboundproxy.ModeDirect},
+			Source: outboundproxy.SourceDefault,
+		}
 	}
-	if err := container.Provide(handler.NewCommonHandler); err != nil {
-		return nil, err
+	return func() outboundproxy.Effective {
+		if manager != nil {
+			if snapshot := manager.Current(); snapshot != nil {
+				return snapshot.GlobalProxy
+			}
+		}
+		return fallback
 	}
+}
 
-	// Proxy & Router
-	if err := container.Provide(proxy.NewProxyServer); err != nil {
-		return nil, err
-	}
-	if err := container.Provide(router.NewRouter); err != nil {
-		return nil, err
-	}
+type runtimeSnapshotReconciler struct {
+	adapters    *provideradapter.Registry
+	accessQuota *accessquota.Runtime
+}
 
-	// Application Layer
-	if err := container.Provide(app.NewApp); err != nil {
-		return nil, err
-	}
+func newSubscriptionRuntime(registry *channel.Registry) (*subscriptionruntime.Runtime, error) {
+	return subscriptionruntime.NewRuntime(registry, subscriptionproviders.Implementations()...)
+}
 
-	return container, nil
+func newProviderAdapterRegistry(
+	channels *channel.Registry,
+	bifrost *bifrostexecutor.RuntimeManager,
+	cpa *cpaexecutor.Adapter,
+) (*provideradapter.Registry, error) {
+	bindings := []provideradapter.Binding{
+		{ProviderKind: channel.ProviderOpenAI, Adapter: bifrost},
+		{ProviderKind: channel.ProviderAnthropic, Adapter: bifrost},
+		{ProviderKind: channel.ProviderGemini, Adapter: bifrost},
+		{ProviderKind: channel.ProviderMultiProtocolGateway, Adapter: bifrost},
+		{ProviderKind: channel.ProviderOpenAICompatible, Adapter: bifrost},
+		{ProviderKind: channel.ProviderCline, Adapter: bifrost},
+		{ProviderKind: channel.ProviderAzureOpenAI, Adapter: bifrost},
+		{ProviderKind: channel.ProviderAWSBedrock, Adapter: bifrost},
+		{ProviderKind: channel.ProviderGoogleVertex, Adapter: bifrost},
+		{ProviderKind: channel.ProviderDeepSeek, Adapter: bifrost},
+		{ProviderKind: channel.ProviderOpenRouter, Adapter: bifrost},
+		{ProviderKind: channel.ProviderJev, Adapter: bifrost},
+		{ProviderKind: channel.ProviderGroq, Adapter: bifrost},
+		{ProviderKind: channel.ProviderXAI, Adapter: bifrost},
+		{ProviderKind: channel.ProviderCodex, Adapter: cpa},
+		{ProviderKind: channel.ProviderClaude, Adapter: cpa},
+		{ProviderKind: channel.ProviderAntigravity, Adapter: cpa},
+		{ProviderKind: channel.ProviderGrok, Adapter: cpa},
+	}
+	return provideradapter.NewRegistry(channels, bindings)
+}
+
+func (reconciler runtimeSnapshotReconciler) ReconcileConfigSnapshot(snapshot *state.ConfigSnapshot) error {
+	if reconciler.adapters == nil {
+		return fmt.Errorf("reconcile provider runtimes: adapter registry is unavailable")
+	}
+	if reconciler.accessQuota == nil {
+		return fmt.Errorf("reconcile access key cost limits: runtime is unavailable")
+	}
+	targets := make([]provideradapter.RuntimeTarget, 0)
+	if snapshot != nil {
+		targets = make([]provideradapter.RuntimeTarget, 0, len(snapshot.Groups))
+		for _, group := range snapshot.Groups {
+			targets = append(targets, provideradapter.RuntimeTarget{
+				Target: group.ResolvedTarget,
+				Proxy:  group.Proxy,
+			})
+		}
+	}
+	if err := reconciler.adapters.ReconcileTargets(targets); err != nil {
+		return err
+	}
+	return reconciler.accessQuota.Reconcile(snapshot.AccessQuotaDefinitions())
+}
+
+func newHTTPRegistry(
+	gatewayHandler *gateway.Handler,
+	controlServer *control.Server,
+	webUIServer *webui.Server,
+) (*httproute.Registry, error) {
+	return httproute.NewRegistry(
+		app.HTTPModule(),
+		controlServer.HTTPModule(),
+		gatewayHandler.HTTPModule(),
+		webUIServer.HTTPModule(),
+	)
+}
+
+type priceRuntimeProvider struct {
+	runtime *control.PriceRuntime
+}
+
+func (provider priceRuntimeProvider) Load() *pricing.Table {
+	return provider.runtime.Load()
 }

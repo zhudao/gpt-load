@@ -1,0 +1,1817 @@
+package control
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+
+	"gpt-load/internal/automodel"
+	"gpt-load/internal/channel"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/jev"
+	app_errors "gpt-load/internal/platform/errors"
+	"gpt-load/internal/platform/response"
+	"gpt-load/internal/platform/utils"
+	"gpt-load/internal/pricing"
+	"gpt-load/internal/protocol"
+	"gpt-load/internal/reasoning"
+	"gpt-load/internal/requestlog"
+	"gpt-load/internal/telemetry"
+	"gpt-load/internal/usage"
+)
+
+const (
+	defaultRequestLogLimit = 50
+	maxRequestLogLimit     = 200
+	requestLogCursorV2     = 2
+)
+
+var canonicalLowercaseUUIDv4 = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+)
+
+var requestLogChannelRegistry = channel.NewRegistry()
+
+type RequestLogReader interface {
+	List(context.Context, requestlog.ListQuery) (requestlog.Page, error)
+	Get(context.Context, string) (requestlog.Record, error)
+	GetRequestBody(context.Context, string) (*requestlog.RequestBody, error)
+}
+
+type requestLogCursorPayload struct {
+	Version       int    `json:"v"`
+	CompletedAtMS int64  `json:"completed_at_ms"`
+	RequestID     string `json:"request_id"`
+}
+
+type requestLogAccessKeyResponse struct {
+	ID      uint    `json:"id"`
+	Name    *string `json:"name"`
+	Deleted bool    `json:"deleted"`
+}
+
+type requestLogReasoningResponse struct {
+	Mode         *string `json:"mode"`
+	Effort       *string `json:"effort"`
+	BudgetTokens *string `json:"budget_tokens"`
+}
+
+type requestLogAttemptResponse struct {
+	credentialDisplayResponse
+	Sequence          int                               `json:"sequence"`
+	GroupID           uint                              `json:"group_id"`
+	GroupName         string                            `json:"group_name"`
+	ChannelID         *channel.ID                       `json:"channel_id"`
+	CredentialID      *uint                             `json:"credential_id"`
+	CredentialName    string                            `json:"credential_name"`
+	Operation         *execution.Operation              `json:"operation"`
+	RouteMode         *channel.RouteMode                `json:"route_mode"`
+	UpstreamModel     *string                           `json:"upstream_model"`
+	UpstreamRequestID *string                           `json:"upstream_request_id"`
+	DispatchState     *execution.DispatchState          `json:"dispatch_state"`
+	ResponseStarted   bool                              `json:"response_started"`
+	UpstreamProtocol  *protocol.Protocol                `json:"upstream_protocol"`
+	Reasoning         *requestLogReasoningResponse      `json:"reasoning"`
+	StatusCode        int                               `json:"status_code"`
+	DurationMs        int64                             `json:"duration_ms"`
+	FailureCategory   telemetry.FailureCategory         `json:"failure_category"`
+	FailureOrigin     *execution.ErrorOrigin            `json:"failure_origin"`
+	FailureScope      *execution.ErrorScope             `json:"failure_scope"`
+	RetryDirective    *telemetry.RetryDirective         `json:"retry_directive"`
+	Effect            *telemetry.Effect                 `json:"effect"`
+	CooldownUntilMS   *int64                            `json:"cooldown_until_ms"`
+	RuleID            *string                           `json:"rule_id"`
+	Action            string                            `json:"action"`
+	WillRetry         bool                              `json:"will_retry"`
+	ErrorCode         string                            `json:"error_code"`
+	ErrorSummary      string                            `json:"error_summary"`
+	Committed         bool                              `json:"committed"`
+	PricingReceipt    *requestLogPricingReceiptResponse `json:"pricing_receipt"`
+}
+
+type requestLogPricingIdentityResponse struct {
+	ScopeKey  *string `json:"scope_key,omitempty"`
+	ChannelID *string `json:"channel_id,omitempty"`
+	ModelID   string  `json:"model_id"`
+}
+
+type requestLogPricingMultiplierResponse struct {
+	Numerator   string `json:"numerator"`
+	Denominator string `json:"denominator"`
+}
+
+type requestLogPricingLineResponse struct {
+	Code                  string                              `json:"code"`
+	ModelID               *string                             `json:"model_id,omitempty"`
+	Quantity              string                              `json:"quantity"`
+	RateNanoUSDPerMillion *string                             `json:"rate_nano_usd_per_million"`
+	Multiplier            requestLogPricingMultiplierResponse `json:"multiplier"`
+	State                 pricing.ReceiptLineState            `json:"state"`
+	AmountNanoUSD         *string                             `json:"amount_nano_usd"`
+}
+
+type requestLogPricingReceiptResponse struct {
+	SchemaVersion          int                               `json:"schema_version"`
+	Method                 string                            `json:"method"`
+	MethodVersion          int                               `json:"method_version"`
+	Currency               string                            `json:"currency"`
+	PricingMode            pricing.Mode                      `json:"pricing_mode"`
+	PriceMultipliers       *pricing.PriceMultipliers         `json:"price_multipliers,omitempty"`
+	Rule                   requestLogPricingIdentityResponse `json:"rule"`
+	ContextThresholdTokens *string                           `json:"context_threshold_tokens"`
+	LineItems              []requestLogPricingLineResponse   `json:"line_items"`
+	BaseTotalNanoUSD       *string                           `json:"base_total_nano_usd,omitempty"`
+	TotalNanoUSD           string                            `json:"total_nano_usd"`
+}
+
+type requestLogItemResponse struct {
+	credentialDisplayResponse
+	RequestAudit              *requestAuditResponse        `json:"request_audit,omitempty"`
+	AutoDecision              *autoDecisionResponse        `json:"auto_decision,omitempty"`
+	TotalEstimatedCostNanoUSD string                       `json:"total_estimated_cost_nano_usd"`
+	TotalCostState            string                       `json:"total_cost_state"`
+	TotalPricingCompleteness  string                       `json:"total_pricing_completeness"`
+	RequestID                 string                       `json:"request_id"`
+	CompletedAtMS             int64                        `json:"completed_at_ms"`
+	AccessKey                 requestLogAccessKeyResponse  `json:"access_key"`
+	Protocol                  string                       `json:"protocol"`
+	Operation                 *execution.Operation         `json:"operation"`
+	UpstreamProtocol          *protocol.Protocol           `json:"upstream_protocol"`
+	ClientIP                  *string                      `json:"client_ip"`
+	ClientModel               *string                      `json:"client_model"`
+	UpstreamModel             *string                      `json:"upstream_model"`
+	UpstreamReportedModel     *string                      `json:"upstream_reported_model"`
+	ModelConsistency          telemetry.ModelConsistency   `json:"model_consistency"`
+	Reasoning                 *requestLogReasoningResponse `json:"reasoning"`
+	Status                    telemetry.RequestStatus      `json:"status"`
+	StatusCode                int                          `json:"status_code"`
+	Stream                    bool                         `json:"stream"`
+	FirstResponseMs           *int64                       `json:"first_response_ms"`
+	DurationMs                int64                        `json:"duration_ms"`
+	AttemptCount              int                          `json:"attempt_count"`
+	ErrorCode                 string                       `json:"error_code"`
+	ErrorSummary              string                       `json:"error_summary"`
+	AffinityHit               bool                         `json:"affinity_hit"`
+	AffinityKind              string                       `json:"affinity_kind"`
+	GroupID                   *uint                        `json:"group_id"`
+	ChannelID                 *channel.ID                  `json:"channel_id"`
+	CredentialID              *uint                        `json:"credential_id"`
+	CredentialName            string                       `json:"credential_name"`
+	RouteMode                 *channel.RouteMode           `json:"route_mode"`
+	UsageState                usage.State                  `json:"usage_state"`
+	CostState                 pricing.CostState            `json:"cost_state"`
+	PricingCompleteness       pricing.Completeness         `json:"pricing_completeness"`
+	PricingMode               *pricing.Mode                `json:"pricing_mode"`
+	ContextThresholdTokens    *string                      `json:"context_threshold_tokens"`
+	InputTokens               string                       `json:"input_tokens"`
+	CacheReadTokens           string                       `json:"cache_read_tokens"`
+	CacheWrite5MTokens        string                       `json:"cache_write_5m_tokens"`
+	CacheWrite1HTokens        string                       `json:"cache_write_1h_tokens"`
+	CacheWriteUnknownTokens   string                       `json:"cache_write_unknown_tokens"`
+	OutputTokens              string                       `json:"output_tokens"`
+	EstimatedCostNanoUSD      string                       `json:"estimated_cost_nano_usd"`
+}
+
+type autoDecisionResponse struct {
+	credentialDisplayResponse
+	automodel.Decision
+	PresetReasoning      *requestLogReasoningResponse      `json:"preset_reasoning"`
+	EstimatedCostNanoUSD string                            `json:"estimated_cost_nano_usd"`
+	InputTokens          *string                           `json:"input_tokens,omitempty"`
+	OutputTokens         *string                           `json:"output_tokens,omitempty"`
+	Receipt              *requestLogPricingReceiptResponse `json:"receipt,omitempty"`
+	CredentialName       string                            `json:"credential_name,omitempty"`
+	CredentialDeleted    bool                              `json:"credential_deleted,omitempty"`
+}
+
+func mapAutoDecisionResponse(value *automodel.Decision, credentialLabels map[uint]string) *autoDecisionResponse {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.Selection.ParameterOverrides = nil
+	copy.Selection.TaskFingerprint = ""
+	credentialID := copy.CredentialID
+	copy.GroupID = 0
+	copy.ChannelID = ""
+	copy.CredentialID = 0
+	credentialName := ""
+	credentialDeleted := false
+	if credentialID != 0 {
+		credentialName = credentialLabelFor(credentialLabels, &credentialID)
+		credentialDeleted = credentialName == ""
+	}
+	response := &autoDecisionResponse{Decision: copy, PresetReasoning: mapRequestLogReasoningConfig(copy.PresetReasoning), EstimatedCostNanoUSD: strconv.FormatInt(copy.EstimatedCostNanoUSD, 10), InputTokens: nullableInt64String(copy.InputTokens), OutputTokens: nullableInt64String(copy.OutputTokens), CredentialName: credentialName, CredentialDeleted: credentialDeleted}
+	if len(copy.Receipt) > 0 {
+		var receipt pricing.Receipt
+		if json.Unmarshal(copy.Receipt, &receipt) == nil && pricing.ValidateReceipt(receipt) == nil {
+			response.Receipt, _ = mapRequestLogPricingReceipt(&receipt)
+		}
+	}
+	return response
+}
+
+func nullableInt64String(value *int64) *string {
+	if value == nil {
+		return nil
+	}
+	text := strconv.FormatInt(*value, 10)
+	return &text
+}
+
+type requestLogDetailResponse struct {
+	requestLogItemResponse
+	Attempts    []requestLogAttemptResponse `json:"attempts"`
+	RequestBody *requestLogBodyResponse     `json:"request_body"`
+}
+
+// requestLogBodyResponse 返回记录下来的客户端原始请求体；正文缩进后便于查看，内容与存储一致。
+type requestLogBodyResponse struct {
+	State         requestlog.RequestBodyState `json:"state"`
+	OriginalBytes int64                       `json:"original_bytes"`
+	Body          *string                     `json:"body"`
+}
+
+func mapRequestLogBody(body *requestlog.RequestBody) *requestLogBodyResponse {
+	if body == nil {
+		return nil
+	}
+	response := &requestLogBodyResponse{State: body.State, OriginalBytes: body.OriginalBytes}
+	if body.Body != nil {
+		text := formatRequestLogBody(*body.Body)
+		response.Body = &text
+	}
+	return response
+}
+
+// maxFormattedRequestBodyBytes 限制详情里格式化后的正文大小。缩进量随嵌套层数增长，
+// 深层嵌套的小请求会按层数平方膨胀，超出预算时直接返回存储原文。
+const maxFormattedRequestBodyBytes = 1 << 20
+
+func formatRequestLogBody(text string) string {
+	if !indentedJSONFits(text, maxFormattedRequestBodyBytes) {
+		return text
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, []byte(text), "", "  "); err != nil {
+		return text
+	}
+	return indented.String()
+}
+
+// indentedJSONFits 估算两空格缩进后的大小上限：每个括号和逗号最多带来一次换行加当前层级的缩进，
+// 冒号后多一个空格；超过 limit 立即返回，不会生成完整输出。
+func indentedJSONFits(text string, limit int) bool {
+	size, depth := len(text), 0
+	inString, escaped := false, false
+	for index := 0; index < len(text); index++ {
+		char := text[index]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case char == '\\':
+				escaped = true
+			case char == '"':
+				inString = false
+			}
+			continue
+		}
+		switch char {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			size += 1 + 2*depth
+		case '}', ']':
+			depth--
+			size += 1 + 2*depth
+		case ',':
+			size += 1 + 2*depth
+		case ':':
+			size++
+		}
+		if size > limit {
+			return false
+		}
+	}
+	return true
+}
+
+type requestLogPaginationResponse struct {
+	Page       int64 `json:"page"`
+	PageSize   int64 `json:"page_size"`
+	TotalItems int64 `json:"total_items"`
+	TotalPages int64 `json:"total_pages"`
+}
+
+type requestLogListResponse struct {
+	Items      []requestLogItemResponse      `json:"items"`
+	NextCursor *string                       `json:"next_cursor"`
+	Pagination *requestLogPaginationResponse `json:"pagination,omitempty"`
+}
+
+func (service *Service) ListRequestLogs(
+	ctx context.Context,
+	query requestlog.ListQuery,
+) (requestlog.Page, error) {
+	if service.requestLogs == nil {
+		return requestlog.Page{}, app_errors.ErrInternalServer
+	}
+	page, err := service.requestLogs.List(ctx, query)
+	if err != nil {
+		if requestWasCanceled(ctx, err) {
+			return requestlog.Page{}, err
+		}
+		return requestlog.Page{}, app_errors.ParseDBError(err)
+	}
+	return page, nil
+}
+
+func (service *Service) GetRequestLog(ctx context.Context, requestID string) (requestlog.Record, error) {
+	if service.requestLogs == nil {
+		return requestlog.Record{}, app_errors.ErrInternalServer
+	}
+	record, err := service.requestLogs.Get(ctx, requestID)
+	if err != nil {
+		if requestWasCanceled(ctx, err) {
+			return requestlog.Record{}, err
+		}
+		return requestlog.Record{}, app_errors.ParseDBError(err)
+	}
+	return record, nil
+}
+
+// GetRequestLogBody 读取请求日志的原始请求体记录；调用方负责先确认可见范围。
+func (service *Service) GetRequestLogBody(ctx context.Context, requestID string) (*requestlog.RequestBody, error) {
+	if service.requestLogs == nil {
+		return nil, app_errors.ErrInternalServer
+	}
+	body, err := service.requestLogs.GetRequestBody(ctx, requestID)
+	if err != nil {
+		if requestWasCanceled(ctx, err) {
+			return nil, err
+		}
+		return nil, app_errors.ParseDBError(err)
+	}
+	return body, nil
+}
+
+func (service *Service) GetAccessKeyRequestLog(
+	ctx context.Context,
+	requestID string,
+	accessKeyID uint,
+) (requestlog.Record, error) {
+	if accessKeyID == 0 {
+		return requestlog.Record{}, app_errors.ErrUnauthorized
+	}
+	page, err := service.ListRequestLogs(ctx, requestlog.ListQuery{
+		AccessKeyID: &accessKeyID,
+		RequestID:   requestID,
+		Limit:       1,
+	})
+	if err != nil {
+		return requestlog.Record{}, err
+	}
+	if len(page.Items) != 1 {
+		return requestlog.Record{}, app_errors.ErrResourceNotFound
+	}
+	return sanitizeAccessKeyRequestLog(page.Items[0]), nil
+}
+
+func (s *Server) handleListRequestLogs(c *gin.Context) {
+	accessKeyID, accessKeyScoped := currentAccessKeyID(c)
+	if accessKeyScoped && requestLogQueryUsesInternalFields(c.Request.URL.RawQuery) {
+		writeServiceError(c, "list_request_logs", app_errors.ErrBadRequest)
+		return
+	}
+	query, apiErr := parseRequestLogQuery(c.Request.URL.RawQuery)
+	if apiErr != nil {
+		writeServiceError(c, "list_request_logs", apiErr)
+		return
+	}
+	if accessKeyScoped {
+		query.AccessKeyID = &accessKeyID
+	}
+	page, err := s.service.ListRequestLogs(c.Request.Context(), query)
+	if err != nil {
+		writeServiceError(c, "list_request_logs", err)
+		return
+	}
+	if accessKeyScoped {
+		for index := range page.Items {
+			page.Items[index] = sanitizeAccessKeyRequestLog(page.Items[index])
+		}
+	}
+	result, err := mapRequestLogListResponse(
+		page,
+		s.service.CredentialLabels(requestLogCredentialIDs(page.Items)),
+	)
+	if err != nil {
+		writeServiceError(c, "list_request_logs", err)
+		return
+	}
+	for index := range result.Items {
+		var autoID uint
+		if decision := page.Items[index].AutoDecision; decision != nil {
+			autoID = decision.CredentialID
+		}
+		s.service.decorateRequestLogCredential(&result.Items[index], autoID)
+	}
+	response.SuccessI18n(c, "common.success", result)
+}
+
+func (s *Server) handleGetRequestLog(c *gin.Context) {
+	requestID := c.Param("request_id")
+	if !canonicalLowercaseUUIDv4.MatchString(requestID) {
+		writeServiceError(c, "get_request_log", app_errors.ErrBadRequest)
+		return
+	}
+	var record requestlog.Record
+	var err error
+	if accessKeyID, scoped := currentAccessKeyID(c); scoped {
+		record, err = s.service.GetAccessKeyRequestLog(
+			c.Request.Context(),
+			requestID,
+			accessKeyID,
+		)
+	} else {
+		record, err = s.service.GetRequestLog(c.Request.Context(), requestID)
+	}
+	if err != nil {
+		writeServiceError(c, "get_request_log", err)
+		return
+	}
+	result, err := mapRequestLogDetailResponse(
+		record,
+		s.service.CredentialLabels(requestLogCredentialIDs([]requestlog.Record{record})),
+	)
+	if err != nil {
+		writeServiceError(c, "get_request_log", err)
+		return
+	}
+	// 记录的是客户端自己发出的原始请求，管理员和该访问密钥本人都可查看。
+	body, err := s.service.GetRequestLogBody(c.Request.Context(), record.RequestID)
+	if err != nil {
+		writeServiceError(c, "get_request_log", err)
+		return
+	}
+	result.RequestBody = mapRequestLogBody(body)
+	var autoID uint
+	if record.AutoDecision != nil {
+		autoID = record.AutoDecision.CredentialID
+	}
+	s.service.decorateRequestLogCredential(&result.requestLogItemResponse, autoID)
+	for index := range result.Attempts {
+		result.Attempts[index].credentialDisplayResponse = s.service.credentialDisplay(result.Attempts[index].CredentialID)
+	}
+	response.SuccessI18n(c, "common.success", result)
+}
+
+func requestLogQueryUsesInternalFields(rawQuery string) bool {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return false
+	}
+	for _, key := range []string{
+		"group_id",
+		"channel_id",
+		"credential_id",
+		"upstream_model",
+		"model_consistency",
+		"access_key_id",
+		"attempt_status_code",
+		"failure_category",
+		"error_code",
+		"retry_state",
+		"retry_count_min",
+		"retry_count_max",
+	} {
+		if _, exists := values[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeAccessKeyRequestLog(record requestlog.Record) requestlog.Record {
+	record.UpstreamModel = ""
+	record.UpstreamReportedModel = ""
+	record.ModelConsistency = telemetry.ModelConsistencyNotApplicable
+	record.AttemptCount = 0
+	record.AffinityHit = false
+	record.AffinityKind = ""
+	record.GroupID = 0
+	record.ChannelID = ""
+	record.CredentialID = 0
+	record.RouteMode = ""
+	record.UpstreamProtocol = ""
+	record.Attempts = []requestlog.Attempt{}
+	if record.RequestAudit != nil {
+		auditCopy := *record.RequestAudit
+		auditCopy.Calls = append([]jev.Observation{}, record.RequestAudit.Calls...)
+		for i := range auditCopy.Calls {
+			c := &auditCopy.Calls[i]
+			c.Provider = ""
+			c.GroupID = 0
+			c.GroupName = ""
+			c.ChannelID = ""
+			c.ChannelName = ""
+			c.CredentialID = 0
+			c.RequestedModel = ""
+			c.UpstreamModel = ""
+			c.ReportedModel = ""
+			c.RequestID = ""
+			c.Receipt = nil
+		}
+		record.RequestAudit = &auditCopy
+	}
+	if record.AutoDecision != nil {
+		copy := *record.AutoDecision
+		copy.Provider = ""
+		copy.GroupID = 0
+		copy.GroupName = ""
+		copy.ChannelID = ""
+		copy.ChannelName = ""
+		copy.CredentialID = 0
+		copy.RequestedModel = ""
+		copy.UpstreamModel = ""
+		copy.ReportedModel = ""
+		copy.RequestID = ""
+		copy.Receipt = nil
+		record.AutoDecision = &copy
+	}
+	return record
+}
+
+func parseRequestLogQuery(rawQuery string) (requestlog.ListQuery, *app_errors.APIError) {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return requestlog.ListQuery{}, app_errors.ErrBadRequest
+	}
+	allowed := map[string]struct{}{
+		"from_ms": {}, "to_ms": {}, "group_id": {}, "channel_id": {}, "credential_id": {},
+		"client_ip": {}, "client_model": {}, "upstream_model": {}, "model_consistency": {}, "access_key_id": {},
+		"status": {}, "request_id": {}, "protocol": {}, "operation": {}, "stream": {}, "final_status_code": {},
+		"audit_status": {}, "audit_rule": {},
+		"usage_state": {}, "cost_state": {}, "pricing_completeness": {}, "cache_present": {},
+		"attempt_status_code": {}, "failure_category": {}, "error_code": {},
+		"retry_state": {}, "retry_count_min": {}, "retry_count_max": {},
+		"first_response_min_ms": {}, "first_response_max_ms": {},
+		"duration_min_ms": {}, "duration_max_ms": {},
+		"input_tokens_min": {}, "input_tokens_max": {},
+		"output_tokens_min": {}, "output_tokens_max": {},
+		"cost_min_nano_usd": {}, "cost_max_nano_usd": {},
+		"limit": {}, "cursor": {}, "page": {}, "page_size": {},
+	}
+	for key, value := range values {
+		if _, ok := allowed[key]; !ok || len(value) != 1 {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+	}
+
+	query := requestlog.ListQuery{Limit: defaultRequestLogLimit}
+	if value, ok := singleQueryValue(values, "audit_status"); ok {
+		switch value {
+		case "allowed", "blocked", "failed", "warned", "incomplete":
+			query.AuditStatus = value
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "audit_rule"); ok {
+		if !validUsageModel(value) {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.AuditRule = value
+	}
+	if value, ok := singleQueryValue(values, "from_ms"); ok {
+		parsed, err := parseCanonicalSafeMilliseconds(value)
+		if err != nil {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		query.FromMS = &parsed
+	}
+	if value, ok := singleQueryValue(values, "to_ms"); ok {
+		parsed, err := parseCanonicalSafeMilliseconds(value)
+		if err != nil {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		query.ToMS = &parsed
+	}
+	if query.FromMS != nil && query.ToMS != nil && *query.FromMS >= *query.ToMS {
+		return requestlog.ListQuery{}, app_errors.ErrValidation
+	}
+	if value, ok := singleQueryValue(values, "group_id"); ok {
+		parsed, apiErr := parseRequestLogID(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.GroupID = &parsed
+	}
+	if value, ok := singleQueryValue(values, "channel_id"); ok {
+		parsed, apiErr := parseRequestLogChannelID(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.ChannelID = parsed
+	}
+	if value, ok := singleQueryValue(values, "credential_id"); ok {
+		parsed, apiErr := parseRequestLogID(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.CredentialID = &parsed
+	}
+	if value, ok := singleQueryValue(values, "client_ip"); ok {
+		address, err := utils.NormalizeIP(value)
+		if err != nil {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.ClientIP = address
+	}
+	if value, ok := singleQueryValue(values, "client_model"); ok {
+		if !validUsageModel(value) {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.ClientModel = value
+	}
+	if value, ok := singleQueryValue(values, "upstream_model"); ok {
+		if !validUsageModel(value) {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.UpstreamModel = value
+	}
+	if value, ok := singleQueryValue(values, "model_consistency"); ok {
+		consistency := telemetry.ModelConsistency(value)
+		switch consistency {
+		case telemetry.ModelConsistencyNotApplicable,
+			telemetry.ModelConsistencyMatch,
+			telemetry.ModelConsistencyUnknown,
+			telemetry.ModelConsistencyMismatch:
+			query.ModelConsistency = consistency
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "access_key_id"); ok {
+		parsed, apiErr := parseRequestLogID(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.AccessKeyID = &parsed
+	}
+	if value, ok := singleQueryValue(values, "protocol"); ok {
+		parsed := protocol.Protocol(value)
+		if !parsed.Valid() {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.Protocol = parsed
+	}
+	if value, ok := singleQueryValue(values, "operation"); ok {
+		operation := execution.Operation(value)
+		if !operation.Valid() {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.Operation = operation
+	}
+	if value, ok := singleQueryValue(values, "stream"); ok {
+		parsed, valid := parseRequestLogBool(value)
+		if !valid {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.Stream = &parsed
+	}
+	if value, ok := singleQueryValue(values, "final_status_code"); ok {
+		parsed, apiErr := parseRequestLogStatusCode(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.FinalStatusCode = &parsed
+	}
+	if value, ok := singleQueryValue(values, "status"); ok {
+		status := telemetry.RequestStatus(value)
+		switch status {
+		case telemetry.RequestStatusSuccess,
+			telemetry.RequestStatusError,
+			telemetry.RequestStatusIncomplete,
+			telemetry.RequestStatusCanceled:
+			query.Status = status
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "usage_state"); ok {
+		state := usage.State(value)
+		switch state {
+		case usage.StateComplete, usage.StatePartial, usage.StateMissing, usage.StateNotApplicable:
+			query.UsageState = state
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "cost_state"); ok {
+		state := pricing.CostState(value)
+		switch state {
+		case pricing.CostStatePriced, pricing.CostStateUnpriced, pricing.CostStateNotApplicable:
+			query.CostState = state
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "pricing_completeness"); ok {
+		completeness := pricing.Completeness(value)
+		switch completeness {
+		case pricing.CompletenessComplete,
+			pricing.CompletenessPartial,
+			pricing.CompletenessUnavailable,
+			pricing.CompletenessNotApplicable:
+			query.PricingCompleteness = completeness
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "cache_present"); ok {
+		parsed, valid := parseRequestLogBool(value)
+		if !valid {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.CachePresent = &parsed
+	}
+	if value, ok := singleQueryValue(values, "attempt_status_code"); ok {
+		parsed, apiErr := parseRequestLogStatusCode(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.AttemptStatusCode = &parsed
+	}
+	if value, ok := singleQueryValue(values, "failure_category"); ok {
+		category := telemetry.FailureCategory(value)
+		switch category {
+		case telemetry.FailureCategoryOK,
+			telemetry.FailureCategoryRateLimited,
+			telemetry.FailureCategoryModelUnavailable,
+			telemetry.FailureCategoryInvalidKey,
+			telemetry.FailureCategoryUpstreamHost,
+			telemetry.FailureCategoryClientError,
+			telemetry.FailureCategoryConversionUnsupported,
+			telemetry.FailureCategoryDownstreamCancel,
+			telemetry.FailureCategoryAuthenticationRequired,
+			telemetry.FailureCategoryAmbiguous:
+			query.FailureCategory = category
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if value, ok := singleQueryValue(values, "error_code"); ok {
+		if !validUsageModel(value) {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.AttemptErrorCode = value
+	}
+	if value, ok := singleQueryValue(values, "retry_state"); ok {
+		state := requestlog.RetryState(value)
+		switch state {
+		case requestlog.RetryStateRetried, requestlog.RetryStateNotRetried:
+			query.RetryState = state
+		default:
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+	}
+	if apiErr := parseRequestLogIntRange(
+		values,
+		"retry_count_min",
+		"retry_count_max",
+		&query.RetryCountMin,
+		&query.RetryCountMax,
+	); apiErr != nil {
+		return requestlog.ListQuery{}, apiErr
+	}
+	for _, target := range []struct {
+		minimumKey string
+		maximumKey string
+		minimum    **int64
+		maximum    **int64
+	}{
+		{"first_response_min_ms", "first_response_max_ms", &query.FirstResponseMinMS, &query.FirstResponseMaxMS},
+		{"duration_min_ms", "duration_max_ms", &query.DurationMinMS, &query.DurationMaxMS},
+		{"input_tokens_min", "input_tokens_max", &query.InputTokensMin, &query.InputTokensMax},
+		{"output_tokens_min", "output_tokens_max", &query.OutputTokensMin, &query.OutputTokensMax},
+		{"cost_min_nano_usd", "cost_max_nano_usd", &query.CostMinNanoUSD, &query.CostMaxNanoUSD},
+	} {
+		if apiErr := parseRequestLogInt64Range(
+			values,
+			target.minimumKey,
+			target.maximumKey,
+			target.minimum,
+			target.maximum,
+		); apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+	}
+	if value, ok := singleQueryValue(values, "request_id"); ok {
+		if !canonicalLowercaseUUIDv4.MatchString(value) {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		query.RequestID = value
+	}
+	paginationRequested := false
+	if value, ok := singleQueryValue(values, "page"); ok {
+		parsed, apiErr := parseRequestLogPage(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.Page = parsed
+		paginationRequested = true
+	}
+	if value, ok := singleQueryValue(values, "page_size"); ok {
+		parsed, apiErr := parseRequestLogPageSize(value)
+		if apiErr != nil {
+			return requestlog.ListQuery{}, apiErr
+		}
+		query.PageSize = parsed
+		paginationRequested = true
+	}
+	if paginationRequested {
+		if query.Page == 0 {
+			query.Page = 1
+		}
+		if query.PageSize == 0 {
+			query.PageSize = defaultRequestLogLimit
+		}
+	}
+	if value, ok := singleQueryValue(values, "limit"); ok {
+		if paginationRequested {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		parsed, err := parseCanonicalSafeUint(value)
+		if err != nil {
+			if errors.Is(err, errUnsafeCanonicalUint) {
+				return requestlog.ListQuery{}, app_errors.ErrValidation
+			}
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		if parsed < 1 || parsed > maxRequestLogLimit {
+			return requestlog.ListQuery{}, app_errors.ErrValidation
+		}
+		query.Limit = int(parsed)
+	}
+	if value, ok := singleQueryValue(values, "cursor"); ok {
+		if paginationRequested {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		cursor, err := decodeRequestLogCursor(value)
+		if err != nil {
+			return requestlog.ListQuery{}, app_errors.ErrBadRequest
+		}
+		query.Cursor = cursor
+	}
+	return query, nil
+}
+
+func parseRequestLogPage(value string) (int, *app_errors.APIError) {
+	parsed, err := parseCanonicalSafeUint(value)
+	if err != nil {
+		if errors.Is(err, errUnsafeCanonicalUint) {
+			return 0, app_errors.ErrValidation
+		}
+		return 0, app_errors.ErrBadRequest
+	}
+	if parsed == 0 || parsed > uint64(maxSafeInteger/int64(maxRequestLogLimit)) {
+		return 0, app_errors.ErrValidation
+	}
+	page, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, app_errors.ErrValidation
+	}
+	return page, nil
+}
+
+func parseRequestLogPageSize(value string) (int, *app_errors.APIError) {
+	parsed, err := parseCanonicalSafeUint(value)
+	if err != nil {
+		if errors.Is(err, errUnsafeCanonicalUint) {
+			return 0, app_errors.ErrValidation
+		}
+		return 0, app_errors.ErrBadRequest
+	}
+	if parsed == 0 || parsed > maxRequestLogLimit {
+		return 0, app_errors.ErrValidation
+	}
+	return int(parsed), nil
+}
+
+func singleQueryValue(values url.Values, key string) (string, bool) {
+	value, ok := values[key]
+	if !ok {
+		return "", false
+	}
+	return value[0], true
+}
+
+func parseRequestLogID(value string) (uint, *app_errors.APIError) {
+	parsed, err := parseCanonicalSafePlatformUint(value)
+	if err != nil {
+		if errors.Is(err, errUnsafeCanonicalUint) {
+			return 0, app_errors.ErrValidation
+		}
+		return 0, app_errors.ErrBadRequest
+	}
+	if parsed == 0 {
+		return 0, app_errors.ErrValidation
+	}
+	return parsed, nil
+}
+
+func parseRequestLogChannelID(value string) (channel.ID, *app_errors.APIError) {
+	channelID := channel.ID(value)
+	if _, ok := requestLogChannelRegistry.Get(channelID); !ok {
+		return "", app_errors.ErrValidation
+	}
+	return channelID, nil
+}
+
+func parseRequestLogBool(value string) (bool, bool) {
+	switch value {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func parseRequestLogStatusCode(value string) (int, *app_errors.APIError) {
+	parsed, err := parseCanonicalNonNegativeInt64(value)
+	if err != nil {
+		return 0, app_errors.ErrBadRequest
+	}
+	if parsed > 999 {
+		return 0, app_errors.ErrValidation
+	}
+	return int(parsed), nil
+}
+
+func parseRequestLogIntRange(
+	values url.Values,
+	minimumKey string,
+	maximumKey string,
+	minimum **int,
+	maximum **int,
+) *app_errors.APIError {
+	var parsedMinimum *int64
+	var parsedMaximum *int64
+	if apiErr := parseRequestLogInt64Range(
+		values,
+		minimumKey,
+		maximumKey,
+		&parsedMinimum,
+		&parsedMaximum,
+	); apiErr != nil {
+		return apiErr
+	}
+	if parsedMinimum != nil {
+		value := int(*parsedMinimum)
+		if int64(value) != *parsedMinimum {
+			return app_errors.ErrValidation
+		}
+		*minimum = &value
+	}
+	if parsedMaximum != nil {
+		value := int(*parsedMaximum)
+		if int64(value) != *parsedMaximum {
+			return app_errors.ErrValidation
+		}
+		*maximum = &value
+	}
+	return nil
+}
+
+func parseRequestLogInt64Range(
+	values url.Values,
+	minimumKey string,
+	maximumKey string,
+	minimum **int64,
+	maximum **int64,
+) *app_errors.APIError {
+	if value, ok := singleQueryValue(values, minimumKey); ok {
+		parsed, err := parseCanonicalNonNegativeInt64(value)
+		if err != nil {
+			return app_errors.ErrBadRequest
+		}
+		*minimum = &parsed
+	}
+	if value, ok := singleQueryValue(values, maximumKey); ok {
+		parsed, err := parseCanonicalNonNegativeInt64(value)
+		if err != nil {
+			return app_errors.ErrBadRequest
+		}
+		*maximum = &parsed
+	}
+	if *minimum != nil && *maximum != nil && **minimum > **maximum {
+		return app_errors.ErrValidation
+	}
+	return nil
+}
+
+func parseCanonicalNonNegativeInt64(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 || strconv.FormatInt(parsed, 10) != value {
+		return 0, fmt.Errorf("value must be a canonical non-negative integer")
+	}
+	return parsed, nil
+}
+
+func decodeRequestLogCursor(encoded string) (*requestlog.Cursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode request log cursor base64: %w", err)
+	}
+	if encoded != base64.RawURLEncoding.EncodeToString(raw) {
+		return nil, fmt.Errorf("decode request log cursor base64: non-canonical encoding")
+	}
+	payload, err := decodeRequestLogCursorPayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Version != requestLogCursorV2 {
+		return nil, fmt.Errorf("unsupported request log cursor version")
+	}
+	if err := validateSafeMilliseconds(payload.CompletedAtMS); err != nil {
+		return nil, fmt.Errorf("invalid request log cursor completed_at_ms: %w", err)
+	}
+	if !canonicalLowercaseUUIDv4.MatchString(payload.RequestID) {
+		return nil, fmt.Errorf("invalid request log cursor request_id")
+	}
+	return &requestlog.Cursor{
+		CompletedAtMS: payload.CompletedAtMS,
+		RequestID:     payload.RequestID,
+	}, nil
+}
+
+func decodeRequestLogCursorPayload(raw []byte) (requestLogCursorPayload, error) {
+	if err := rejectDuplicateRequestLogCursorFields(raw); err != nil {
+		return requestLogCursorPayload{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var payload requestLogCursorPayload
+	if err := decoder.Decode(&payload); err != nil {
+		return requestLogCursorPayload{}, fmt.Errorf("decode request log cursor JSON: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errorsIsEOF(err) {
+		if err == nil {
+			return requestLogCursorPayload{}, fmt.Errorf("decode request log cursor JSON: multiple values")
+		}
+		return requestLogCursorPayload{}, fmt.Errorf("decode request log cursor JSON: %w", err)
+	}
+	return payload, nil
+}
+
+func rejectDuplicateRequestLogCursorFields(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode request log cursor JSON: %w", err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("request log cursor must be a JSON object")
+	}
+	seen := make(map[string]struct{}, 3)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode request log cursor field: %w", err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			return fmt.Errorf("request log cursor field name is invalid")
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate request log cursor field %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("decode request log cursor field %q: %w", key, err)
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("decode request log cursor JSON: %w", err)
+	}
+	return nil
+}
+
+func errorsIsEOF(err error) bool {
+	return err == io.EOF
+}
+
+func encodeRequestLogCursor(cursor requestlog.Cursor) (string, error) {
+	if err := validateSafeMilliseconds(cursor.CompletedAtMS); err != nil {
+		return "", fmt.Errorf("encode request log cursor: invalid completed_at_ms: %w", err)
+	}
+	if !canonicalLowercaseUUIDv4.MatchString(cursor.RequestID) {
+		return "", fmt.Errorf("encode request log cursor: invalid request ID")
+	}
+	payload := requestLogCursorPayload{
+		Version:       requestLogCursorV2,
+		CompletedAtMS: cursor.CompletedAtMS,
+		RequestID:     cursor.RequestID,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode request log cursor JSON: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func credentialLabelFor(labels map[uint]string, credentialID *uint) string {
+	if credentialID == nil {
+		return ""
+	}
+	// 保持既有响应结构：未知或不可读标识用占位，只有确认不存在才留空。
+	if labels == nil {
+		return "—"
+	}
+	label, exists := labels[*credentialID]
+	if exists && label == "" {
+		return "—"
+	}
+	return label
+}
+
+// 一页日志里的凭据数远小于条数：同一个号会被反复使用，去重后通常只剩几个。
+func requestLogCredentialIDs(records []requestlog.Record) []uint {
+	ids := make([]uint, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.CredentialID)
+		if record.AutoDecision != nil {
+			ids = append(ids, record.AutoDecision.CredentialID)
+		}
+		for _, attempt := range record.Attempts {
+			ids = append(ids, attempt.CredentialID)
+		}
+	}
+	return ids
+}
+
+func mapRequestLogListResponse(
+	page requestlog.Page,
+	credentialLabels map[uint]string,
+) (requestLogListResponse, error) {
+	result := requestLogListResponse{
+		Items: make([]requestLogItemResponse, 0, len(page.Items)),
+	}
+	for _, record := range page.Items {
+		if err := validateSafeMilliseconds(record.CompletedAtMS); err != nil {
+			return requestLogListResponse{}, fmt.Errorf(
+				"map request log completed_at_ms: %w",
+				err,
+			)
+		}
+		usageCost, err := mapRequestLogUsageCost(record)
+		if err != nil {
+			return requestLogListResponse{}, err
+		}
+		item, err := mapRequestLogItemResponse(record, usageCost, credentialLabels)
+		if err != nil {
+			return requestLogListResponse{}, err
+		}
+		result.Items = append(result.Items, item)
+	}
+	if page.NextCursor != nil {
+		encoded, err := encodeRequestLogCursor(*page.NextCursor)
+		if err != nil {
+			return requestLogListResponse{}, err
+		}
+		result.NextCursor = &encoded
+	}
+	if page.Pagination != nil {
+		pagination := *page.Pagination
+		if pagination.Page <= 0 || pagination.PageSize <= 0 || pagination.TotalItems < 0 ||
+			pagination.TotalPages != requestLogTotalPages(pagination.TotalItems, pagination.PageSize) ||
+			int64(pagination.Page) > maxSafeInteger || int64(pagination.PageSize) > maxSafeInteger ||
+			pagination.TotalItems > maxSafeInteger || pagination.TotalPages > maxSafeInteger {
+			return requestLogListResponse{}, fmt.Errorf("map request log pagination: invalid value")
+		}
+		result.Pagination = &requestLogPaginationResponse{
+			Page:       int64(pagination.Page),
+			PageSize:   int64(pagination.PageSize),
+			TotalItems: pagination.TotalItems,
+			TotalPages: pagination.TotalPages,
+		}
+	}
+	return result, nil
+}
+
+func requestLogTotalPages(totalItems int64, pageSize int) int64 {
+	if totalItems == 0 || pageSize <= 0 {
+		return 0
+	}
+	pages := totalItems / int64(pageSize)
+	if totalItems%int64(pageSize) != 0 {
+		pages++
+	}
+	return pages
+}
+
+func mapRequestLogItemResponse(
+	record requestlog.Record,
+	usageCost requestLogUsageCostResponse,
+	credentialLabels map[uint]string,
+) (requestLogItemResponse, error) {
+	inputTokens, ok := checkedRequestLogInputTokens(record)
+	if !ok {
+		return requestLogItemResponse{}, fmt.Errorf("map request log input tokens: overflow")
+	}
+	routeMode, err := nullableRequestLogRouteMode(record.RouteMode)
+	if err != nil {
+		return requestLogItemResponse{}, fmt.Errorf("map request log final route mode: %w", err)
+	}
+	operation, err := nullableRequestLogOperation(record.Operation)
+	if err != nil {
+		return requestLogItemResponse{}, fmt.Errorf("map request log operation: %w", err)
+	}
+	upstreamProtocol, err := nullableRequestLogUpstreamProtocol(record.UpstreamProtocol)
+	if err != nil {
+		return requestLogItemResponse{}, fmt.Errorf("map request log upstream protocol: %w", err)
+	}
+	pricingMode, err := nullableRequestLogPricingMode(record)
+	if err != nil {
+		return requestLogItemResponse{}, fmt.Errorf("map request log pricing mode: %w", err)
+	}
+	var contextThresholdTokens *string
+	if record.ContextThresholdTokens != nil {
+		value := strconv.FormatInt(*record.ContextThresholdTokens, 10)
+		contextThresholdTokens = &value
+	}
+	total := telemetry.TotalPricing(telemetry.PricingObservation{CostState: string(record.CostState), PricingCompleteness: string(record.PricingCompleteness), EstimatedCostNanoUSD: record.EstimatedCostNanoUSD}, record.AutoDecision, record.RequestAudit)
+	return requestLogItemResponse{
+		AutoDecision:              mapAutoDecisionResponse(record.AutoDecision, credentialLabels),
+		RequestAudit:              mapRequestAudit(record.RequestAudit),
+		TotalEstimatedCostNanoUSD: strconv.FormatInt(total.EstimatedCostNanoUSD, 10),
+		TotalCostState:            total.CostState,
+		TotalPricingCompleteness:  total.PricingCompleteness,
+		RequestID:                 record.RequestID,
+		CompletedAtMS:             record.CompletedAtMS,
+		AccessKey: requestLogAccessKeyResponse{
+			ID:      record.AccessKey.ID,
+			Name:    record.AccessKey.Name,
+			Deleted: record.AccessKey.Deleted,
+		},
+		Protocol:                string(record.Protocol),
+		Operation:               operation,
+		UpstreamProtocol:        upstreamProtocol,
+		ClientIP:                nullableRequestLogModel(record.ClientIP),
+		ClientModel:             nullableRequestLogModel(record.ClientModel),
+		UpstreamModel:           nullableRequestLogModel(record.UpstreamModel),
+		UpstreamReportedModel:   nullableRequestLogModel(record.UpstreamReportedModel),
+		ModelConsistency:        record.ModelConsistency,
+		Reasoning:               mapRequestLogReasoning(record),
+		Status:                  record.Status,
+		StatusCode:              record.StatusCode,
+		Stream:                  record.Stream,
+		FirstResponseMs:         record.FirstResponseMs,
+		DurationMs:              record.DurationMs,
+		AttemptCount:            record.AttemptCount,
+		ErrorCode:               record.ErrorCode,
+		ErrorSummary:            record.ErrorSummary,
+		AffinityHit:             record.AffinityHit,
+		AffinityKind:            record.AffinityKind,
+		GroupID:                 usageCost.groupID,
+		ChannelID:               usageCost.channelID,
+		CredentialID:            usageCost.credentialID,
+		CredentialName:          credentialLabelFor(credentialLabels, usageCost.credentialID),
+		RouteMode:               routeMode,
+		UsageState:              record.UsageState,
+		CostState:               record.CostState,
+		PricingCompleteness:     record.PricingCompleteness,
+		PricingMode:             pricingMode,
+		ContextThresholdTokens:  contextThresholdTokens,
+		InputTokens:             strconv.FormatInt(inputTokens, 10),
+		CacheReadTokens:         strconv.FormatInt(record.CacheReadTokens, 10),
+		CacheWrite5MTokens:      strconv.FormatInt(record.CacheWrite5MTokens, 10),
+		CacheWrite1HTokens:      strconv.FormatInt(record.CacheWrite1HTokens, 10),
+		CacheWriteUnknownTokens: strconv.FormatInt(record.CacheWriteUnknownTokens, 10),
+		OutputTokens:            strconv.FormatInt(record.OutputTokens, 10),
+		EstimatedCostNanoUSD:    usageCost.estimatedCostNanoUSD,
+	}, nil
+}
+
+func nullableRequestLogPricingMode(record requestlog.Record) (*pricing.Mode, error) {
+	mode := record.PricingMode
+	if mode == "" {
+		for index := len(record.Attempts) - 1; index >= 0; index-- {
+			attempt := record.Attempts[index]
+			if attempt.GroupID == record.GroupID &&
+				attempt.ChannelID == record.ChannelID &&
+				attempt.CredentialID == record.CredentialID &&
+				attempt.PricingReceipt != nil {
+				mode = attempt.PricingReceipt.PricingMode
+				if attempt.PricingReceipt.SchemaVersion < 4 {
+					mode = pricing.ModeStandard
+				}
+				break
+			}
+		}
+	}
+	if mode == "" {
+		return nil, nil
+	}
+	if !mode.Valid() {
+		return nil, fmt.Errorf("invalid pricing mode")
+	}
+	return &mode, nil
+}
+
+func mapRequestLogReasoning(record requestlog.Record) *requestLogReasoningResponse {
+	return mapRequestLogReasoningConfig(record.Reasoning)
+}
+
+func mapRequestLogReasoningConfig(config reasoning.Config) *requestLogReasoningResponse {
+	if !config.Present() {
+		return nil
+	}
+	result := &requestLogReasoningResponse{
+		Mode:   nullableRequestLogReasoningValue(config.Mode),
+		Effort: nullableRequestLogReasoningValue(config.Effort),
+	}
+	if config.BudgetTokens != nil {
+		value := strconv.FormatInt(*config.BudgetTokens, 10)
+		result.BudgetTokens = &value
+	}
+	return result
+}
+
+func nullableRequestLogReasoningValue(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func checkedRequestLogInputTokens(record requestlog.Record) (int64, bool) {
+	total := int64(0)
+	for _, value := range []int64{
+		record.UncachedInputTokens,
+		record.CacheReadTokens,
+		record.CacheWrite5MTokens,
+		record.CacheWrite1HTokens,
+		record.CacheWriteUnknownTokens,
+	} {
+		var ok bool
+		total, ok = usage.CheckedAdd(total, value)
+		if !ok {
+			return 0, false
+		}
+	}
+	return total, true
+}
+
+func mapRequestLogDetailResponse(
+	record requestlog.Record,
+	credentialLabels map[uint]string,
+) (requestLogDetailResponse, error) {
+	usageCost, err := mapRequestLogUsageCost(record)
+	if err != nil {
+		return requestLogDetailResponse{}, err
+	}
+	item, err := mapRequestLogItemResponse(record, usageCost, credentialLabels)
+	if err != nil {
+		return requestLogDetailResponse{}, err
+	}
+	attempts := make([]requestLogAttemptResponse, 0, len(record.Attempts))
+	for _, attempt := range record.Attempts {
+		mapped, err := mapRequestLogAttempt(attempt, credentialLabels)
+		if err != nil {
+			return requestLogDetailResponse{}, err
+		}
+		attempts = append(attempts, mapped)
+	}
+	return requestLogDetailResponse{
+		requestLogItemResponse: item,
+		Attempts:               attempts,
+	}, nil
+}
+
+func mapRequestLogAttempt(
+	attempt requestlog.Attempt,
+	credentialLabels map[uint]string,
+) (requestLogAttemptResponse, error) {
+	channelID, err := nullableRequestLogChannelID(attempt.ChannelID)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	credentialID, err := nullableRequestLogID(attempt.CredentialID, "credential")
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	operation, err := nullableRequestLogOperation(attempt.Operation)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	routeMode, err := nullableRequestLogRouteMode(attempt.RouteMode)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	dispatchState, err := nullableRequestLogDispatchState(attempt.DispatchState)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	upstreamProtocol, err := nullableRequestLogUpstreamProtocol(attempt.UpstreamProtocol)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	failureOrigin, err := nullableRequestLogFailureOrigin(attempt.FailureOrigin)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	failureScope, err := nullableRequestLogFailureScope(attempt.FailureScope)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	retryDirective, err := nullableRequestLogRetryDirective(attempt.RetryDirective)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	effect, err := nullableRequestLogEffect(attempt.Effect)
+	if err != nil {
+		return requestLogAttemptResponse{}, fmt.Errorf("map request log attempt: %w", err)
+	}
+	receipt, err := mapRequestLogPricingReceipt(attempt.PricingReceipt)
+	if err != nil {
+		return requestLogAttemptResponse{}, err
+	}
+	return requestLogAttemptResponse{
+		Sequence:          attempt.Sequence,
+		GroupID:           attempt.GroupID,
+		GroupName:         attempt.GroupName,
+		ChannelID:         channelID,
+		CredentialID:      credentialID,
+		CredentialName:    credentialLabelFor(credentialLabels, credentialID),
+		Operation:         operation,
+		RouteMode:         routeMode,
+		UpstreamModel:     nullableRequestLogModel(attempt.UpstreamModel),
+		UpstreamRequestID: nullableRequestLogModel(attempt.UpstreamRequestID),
+		DispatchState:     dispatchState,
+		ResponseStarted:   attempt.ResponseStarted,
+		UpstreamProtocol:  upstreamProtocol,
+		Reasoning:         mapRequestLogReasoningConfig(attempt.Reasoning),
+		StatusCode:        attempt.StatusCode,
+		DurationMs:        attempt.DurationMs,
+		FailureCategory:   attempt.FailureCategory,
+		FailureOrigin:     failureOrigin,
+		FailureScope:      failureScope,
+		RetryDirective:    retryDirective,
+		Effect:            effect,
+		CooldownUntilMS:   attempt.CooldownUntilMS,
+		RuleID:            nullableRequestLogModel(attempt.RuleID),
+		Action:            requestLogAttemptAction(attempt.Action),
+		WillRetry:         attempt.WillRetry,
+		ErrorCode:         attempt.ErrorCode,
+		ErrorSummary:      attempt.ErrorSummary,
+		Committed:         attempt.Committed,
+		PricingReceipt:    receipt,
+	}, nil
+}
+
+func requestLogAttemptAction(action telemetry.Action) string {
+	return string(action)
+}
+
+func mapRequestLogPricingReceipt(
+	receipt *pricing.Receipt,
+) (*requestLogPricingReceiptResponse, error) {
+	if receipt == nil {
+		return nil, nil
+	}
+	if err := pricing.ValidateReceipt(*receipt); err != nil {
+		return nil, fmt.Errorf("map request log pricing receipt: %w", err)
+	}
+	result := &requestLogPricingReceiptResponse{
+		SchemaVersion:    receipt.SchemaVersion,
+		Method:           receipt.Method,
+		MethodVersion:    receipt.MethodVersion,
+		Currency:         receipt.Currency,
+		PricingMode:      receipt.PricingMode,
+		PriceMultipliers: receipt.PriceMultipliers,
+		Rule:             requestLogPricingIdentityResponse{ModelID: receipt.Rule.ModelID},
+		LineItems:        make([]requestLogPricingLineResponse, 0, len(receipt.LineItems)),
+		TotalNanoUSD:     strconv.FormatInt(receipt.TotalNanoUSD, 10),
+	}
+	if receipt.SchemaVersion < 4 {
+		result.PricingMode = pricing.ModeStandard
+	}
+	if receipt.SchemaVersion == 1 {
+		scopeKey := receipt.Rule.ScopeKey
+		result.Rule.ScopeKey = &scopeKey
+	}
+	if receipt.SchemaVersion >= 3 {
+		channelID := channel.ID(receipt.Rule.ChannelID)
+		if _, ok := requestLogChannelRegistry.Get(channelID); !ok {
+			return nil, fmt.Errorf("map request log pricing receipt: unknown channel ID")
+		}
+		value := string(channelID)
+		result.Rule.ChannelID = &value
+	}
+	if receipt.ContextThresholdTokens != nil {
+		value := strconv.FormatInt(*receipt.ContextThresholdTokens, 10)
+		result.ContextThresholdTokens = &value
+	}
+	if receipt.BaseTotalNanoUSD != nil {
+		value := strconv.FormatInt(*receipt.BaseTotalNanoUSD, 10)
+		result.BaseTotalNanoUSD = &value
+	}
+	for _, line := range receipt.LineItems {
+		mapped := requestLogPricingLineResponse{
+			Code:     line.Code,
+			Quantity: strconv.FormatInt(line.Quantity, 10),
+			Multiplier: requestLogPricingMultiplierResponse{
+				Numerator:   strconv.FormatInt(line.Multiplier.Numerator, 10),
+				Denominator: strconv.FormatInt(line.Multiplier.Denominator, 10),
+			},
+			State: line.State,
+		}
+		if line.ModelID != "" {
+			value := line.ModelID
+			mapped.ModelID = &value
+		}
+		if line.RateNanoUSDPerMillion != nil {
+			value := strconv.FormatInt(*line.RateNanoUSDPerMillion, 10)
+			mapped.RateNanoUSDPerMillion = &value
+		}
+		if line.AmountNanoUSD != nil {
+			value := strconv.FormatInt(*line.AmountNanoUSD, 10)
+			mapped.AmountNanoUSD = &value
+		}
+		result.LineItems = append(result.LineItems, mapped)
+	}
+	return result, nil
+}
+
+func nullableRequestLogModel(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func nullableRequestLogChannelID(value channel.ID) (*channel.ID, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if _, ok := requestLogChannelRegistry.Get(value); !ok {
+		return nil, fmt.Errorf("unknown channel ID")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogID(value uint, field string) (*uint, error) {
+	if value == 0 {
+		return nil, nil
+	}
+	if uint64(value) > uint64(maxSafeInteger) {
+		return nil, fmt.Errorf("unsafe %s ID", field)
+	}
+	return &value, nil
+}
+
+// legacyMistralAudioSpeechOperation 是语音合成并入 audio-speech 协议前写入日志的操作名，只用于读取历史记录。
+const legacyMistralAudioSpeechOperation execution.Operation = "mistral_audio_speech"
+
+func nullableRequestLogOperation(value execution.Operation) (*execution.Operation, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() && value != legacyMistralAudioSpeechOperation {
+		return nil, fmt.Errorf("invalid operation")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogUpstreamProtocol(value protocol.Protocol) (*protocol.Protocol, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid upstream protocol")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogRouteMode(value channel.RouteMode) (*channel.RouteMode, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid route mode")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogDispatchState(
+	value execution.DispatchState,
+) (*execution.DispatchState, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid dispatch state")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogFailureOrigin(
+	value execution.ErrorOrigin,
+) (*execution.ErrorOrigin, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid failure origin")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogFailureScope(
+	value execution.ErrorScope,
+) (*execution.ErrorScope, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid failure scope")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogRetryDirective(
+	value telemetry.RetryDirective,
+) (*telemetry.RetryDirective, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid retry directive")
+	}
+	return &value, nil
+}
+
+func nullableRequestLogEffect(value telemetry.Effect) (*telemetry.Effect, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !value.Valid() {
+		return nil, fmt.Errorf("invalid effect")
+	}
+	return &value, nil
+}
+
+type requestLogUsageCostResponse struct {
+	groupID              *uint
+	channelID            *channel.ID
+	credentialID         *uint
+	estimatedCostNanoUSD string
+}
+
+func mapRequestLogUsageCost(record requestlog.Record) (requestLogUsageCostResponse, error) {
+	if err := requestlog.ValidateUsageCostState(
+		record.UsageState,
+		record.CostState,
+		record.PricingCompleteness,
+		record.EstimatedCostNanoUSD,
+	); err != nil {
+		return requestLogUsageCostResponse{}, fmt.Errorf("map request log usage/cost: %w", err)
+	}
+	for _, value := range []int64{
+		record.UncachedInputTokens,
+		record.CacheReadTokens,
+		record.CacheWrite5MTokens,
+		record.CacheWrite1HTokens,
+		record.CacheWriteUnknownTokens,
+		record.OutputTokens,
+	} {
+		if value < 0 {
+			return requestLogUsageCostResponse{}, fmt.Errorf("map request log usage tokens: negative value")
+		}
+	}
+	if _, ok := usage.CheckedTotal(usage.Tokens{
+		UncachedInput:     record.UncachedInputTokens,
+		CacheRead:         record.CacheReadTokens,
+		CacheWrite5M:      record.CacheWrite5MTokens,
+		CacheWrite1H:      record.CacheWrite1HTokens,
+		CacheWriteUnknown: record.CacheWriteUnknownTokens,
+		Output:            record.OutputTokens,
+	}); !ok {
+		return requestLogUsageCostResponse{}, fmt.Errorf("map request log usage tokens: unsafe total")
+	}
+	if uint64(record.GroupID) > uint64(maxSafeInteger) {
+		return requestLogUsageCostResponse{}, fmt.Errorf("map request log final Group ID: unsafe value")
+	}
+	channelID, err := nullableRequestLogChannelID(record.ChannelID)
+	if err != nil {
+		return requestLogUsageCostResponse{}, fmt.Errorf("map request log final channel: %w", err)
+	}
+	credentialID, err := nullableRequestLogID(record.CredentialID, "credential")
+	if err != nil {
+		return requestLogUsageCostResponse{}, fmt.Errorf("map request log final credential: %w", err)
+	}
+	if record.EstimatedCostNanoUSD < 0 {
+		return requestLogUsageCostResponse{}, fmt.Errorf(
+			"map request log usage/cost: negative estimated cost",
+		)
+	}
+	result := requestLogUsageCostResponse{
+		channelID:            channelID,
+		credentialID:         credentialID,
+		estimatedCostNanoUSD: strconv.FormatInt(record.EstimatedCostNanoUSD, 10),
+	}
+	if record.GroupID != 0 {
+		groupID := record.GroupID
+		result.groupID = &groupID
+	}
+	return result, nil
+}
+
+// CredentialLabels 把凭据 ID 翻译成可读标识：API 密钥给掩码，订阅账号给邮箱掩码。
+// 密文常驻凭据注册表，整个过程不读数据库；只按持久身份判断存在，不按运行状态过滤。
+// 已存在但标识无法解析的凭据保留空值，只有注册表中不存在的凭据才省略。
+// 入参允许重复，每个 ID 至多解密一次；nil 结果表示关联信息尚不可查询，而非删除。
+func (s *Service) CredentialLabels(credentialIDs []uint) map[uint]string {
+	if s == nil || s.manager == nil || s.registry == nil || s.encryption == nil || len(credentialIDs) == 0 {
+		return nil
+	}
+	s.writeMu.RLock()
+	defer s.writeMu.RUnlock()
+	snapshot := s.manager.Current()
+	if snapshot == nil {
+		return nil
+	}
+	labels := make(map[uint]string, len(credentialIDs))
+	seen := make(map[uint]struct{}, len(credentialIDs))
+	for _, credentialID := range credentialIDs {
+		if credentialID == 0 {
+			continue
+		}
+		if _, done := seen[credentialID]; done {
+			continue
+		}
+		seen[credentialID] = struct{}{}
+		ref, known := s.registry.CredentialRef(credentialID)
+		if !known {
+			continue
+		}
+		labels[credentialID] = ""
+		group, exists := snapshot.GroupCatalog[ref.GroupID]
+		if !exists {
+			continue
+		}
+		label, err := s.credentialLabel(ref.EncryptedValue, group.ChannelID, group.ConnectionType)
+		if err != nil || label == "" {
+			continue
+		}
+		labels[credentialID] = label
+	}
+	return labels
+}
+
+// 与凭据列表一致：订阅账号给完整邮箱（本就在管理面明示），API 密钥给掩码。
+func (s *Service) credentialLabel(
+	ciphertext string,
+	channelID channel.ID,
+	connectionType string,
+) (string, error) {
+	plaintext, err := s.encryption.Decrypt(ciphertext)
+	if err != nil {
+		return "", err
+	}
+	expected, known := s.channelRegistry.ConnectionType(channelID)
+	if !known || expected != strings.TrimSpace(connectionType) {
+		return "", fmt.Errorf("channel connection mismatch")
+	}
+	if driver, bound := s.subscriptions.Driver(channelID); bound {
+		credential, parseErr := driver.Parse([]byte(plaintext))
+		plaintext = ""
+		if parseErr != nil {
+			return "", parseErr
+		}
+		return strings.TrimSpace(credential.Account().Email), nil
+	}
+	validated, err := normalizeStoredCredential(s.channelRegistry, channelID, plaintext)
+	if err != nil {
+		return "", err
+	}
+	return maskCanonicalCredential(validated.CanonicalJSON())
+}

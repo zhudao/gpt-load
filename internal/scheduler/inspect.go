@@ -1,0 +1,460 @@
+package scheduler
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"gpt-load/internal/channel"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/protocol"
+	"gpt-load/internal/state"
+)
+
+var ErrInconsistentSnapshot = errors.New("inconsistent scheduler snapshot")
+
+type ReasonCode string
+
+const (
+	ReasonAccessKeyDisabled         ReasonCode = "access_key_disabled"
+	ReasonAccessKeyExpired          ReasonCode = "access_key_expired"
+	ReasonProtocolFiltered          ReasonCode = "protocol_filtered"
+	ReasonModelFiltered             ReasonCode = "model_filtered"
+	ReasonModelRequiredByFilter     ReasonCode = "model_required_by_filter"
+	ReasonAdvisorModelUnavailable   ReasonCode = "advisor_model_unavailable"
+	ReasonOperationUnsupported      ReasonCode = "operation_unsupported"
+	ReasonNativeRouteRequired       ReasonCode = "native_route_required"
+	ReasonNoRouteTarget             ReasonCode = "no_route_target"
+	ReasonGroupDisabled             ReasonCode = "group_disabled"
+	ReasonCodexLiveDisabled         ReasonCode = "codex_live_disabled"
+	ReasonWebsocketDisabled         ReasonCode = "websocket_disabled"
+	ReasonGroupFiltered             ReasonCode = "group_filtered"
+	ReasonNoAvailableGroup          ReasonCode = "no_available_group"
+	ReasonNoCredentials             ReasonCode = "no_credentials"
+	ReasonGroupWeightZero           ReasonCode = "group_weight_zero"
+	ReasonCredentialDisabled        ReasonCode = "credential_disabled"
+	ReasonCredentialAuthUnavailable ReasonCode = "credential_auth_unavailable"
+	ReasonCredentialBlacklisted     ReasonCode = "credential_blacklisted"
+	ReasonCredentialCooldown        ReasonCode = "credential_cooldown"
+	ReasonModelCooldown             ReasonCode = "model_cooldown"
+	ReasonCredentialWeightZero      ReasonCode = "credential_weight_zero"
+	ReasonCredentialNotAllowed      ReasonCode = "credential_not_allowed"
+	ReasonNoAvailableCredential     ReasonCode = "no_available_credential"
+)
+
+type Inspection struct {
+	ClientProtocol   protocol.Protocol
+	Operation        execution.Operation
+	RouteRequirement execution.RouteRequirement
+	ExternalModel    *string
+	Routable         bool
+	Reason           ReasonCode
+	Groups           []GroupInspection
+}
+
+type GroupInspection struct {
+	Priority                  int32
+	GroupID                   uint
+	GroupName                 string
+	ChannelID                 channel.ID
+	RouteMode                 channel.RouteMode
+	RouteRequirementSatisfied bool
+	UpstreamModelID           *string
+	WeightManual              *int
+	Included                  bool
+	Routable                  bool
+	Reason                    ReasonCode
+	Credentials               []CredentialInspection
+}
+
+type CredentialInspection struct {
+	CredentialID    uint
+	Available       bool
+	Reason          ReasonCode
+	WeightManual    *int
+	EffectiveWeight int64
+	CooldownUntil   time.Time
+}
+
+// CredentialRuntimeView is the scheduler's neutral view of runtime health.
+type CredentialRuntimeView = state.CredentialRuntimeView
+
+type targetDecision struct {
+	target                   state.RouteTarget
+	group                    state.GroupCatalogView
+	requirementOK            bool
+	responsesStoreDowngraded bool
+	included                 bool
+	reason                   ReasonCode
+}
+
+func cloneWeight(weight *int) *int {
+	if weight == nil {
+		return nil
+	}
+	value := *weight
+	return &value
+}
+
+func evaluateTargets(
+	snapshot *state.ConfigSnapshot,
+	index state.ExecutionCandidateIndex,
+	query normalizedQuery,
+) ([]targetDecision, ReasonCode, error) {
+	if snapshot == nil {
+		return nil, "", fmt.Errorf("%w: nil ConfigSnapshot", ErrInconsistentSnapshot)
+	}
+	if query.accessKey.Status == state.AccessKeyStatusDisabled {
+		return []targetDecision{}, ReasonAccessKeyDisabled, nil
+	}
+	if len(query.accessKey.Filters.Protocols) > 0 {
+		if _, allowed := query.accessKey.Filters.Protocols[query.clientProtocol]; !allowed {
+			return []targetDecision{}, ReasonProtocolFiltered, nil
+		}
+	}
+	if len(query.accessKey.Filters.Models) > 0 {
+		if query.externalModel == nil {
+			return []targetDecision{}, ReasonModelRequiredByFilter, nil
+		}
+		if _, allowed := query.accessKey.Filters.Models[*query.externalModel]; !allowed {
+			return []targetDecision{}, ReasonModelFiltered, nil
+		}
+	}
+	if !query.clientProtocol.Valid() || !query.operation.Valid() ||
+		!query.routeRequirement.Valid() || !query.responsesStorePreference.Valid() {
+		return []targetDecision{}, ReasonOperationUnsupported, nil
+	}
+	byOperation := index[query.clientProtocol]
+	if len(byOperation) == 0 {
+		return []targetDecision{}, ReasonNoRouteTarget, nil
+	}
+	byModel, operationSupported := byOperation[query.operation]
+	if !operationSupported {
+		return []targetDecision{}, ReasonOperationUnsupported, nil
+	}
+	modelKey := state.NoModelRouteKey
+	clientSelectedLiveModel := query.clientProtocol == protocol.CodexLive && query.operation == execution.OperationLiveCall
+	if query.externalModel != nil && !clientSelectedLiveModel {
+		modelKey = *query.externalModel
+	}
+	routes := byModel[modelKey]
+	if len(routes) == 0 {
+		return []targetDecision{}, ReasonNoRouteTarget, nil
+	}
+
+	decisions := make([]targetDecision, 0, len(routes))
+	included := 0
+	for _, route := range routes {
+		group, exists := snapshot.GroupCatalog[route.GroupID]
+		if !exists {
+			return nil, "", fmt.Errorf(
+				"%w: route target group %d missing from catalog",
+				ErrInconsistentSnapshot,
+				route.GroupID,
+			)
+		}
+		requirementOK, storeDowngraded, requirementReason := routeRequirementSatisfied(query, route)
+		decision := targetDecision{
+			target: cloneRouteTarget(route), group: group,
+			requirementOK: requirementOK, responsesStoreDowngraded: storeDowngraded,
+			included: true,
+		}
+		if clientSelectedLiveModel && query.externalModel != nil {
+			decision.target.UpstreamModelID = *query.externalModel
+		}
+		groupFiltered := false
+		if len(query.accessKey.Filters.Groups) > 0 {
+			_, allowed := query.accessKey.Filters.Groups[route.GroupID]
+			groupFiltered = !allowed
+		}
+		switch {
+		case !requirementOK:
+			decision.included = false
+			decision.reason = requirementReason
+		case !group.Enabled:
+			decision.included = false
+			decision.reason = ReasonGroupDisabled
+		case clientSelectedLiveModel && snapshot.Groups[route.GroupID].CodexLiveMode == state.CodexLiveOff:
+			decision.included = false
+			decision.reason = ReasonCodexLiveDisabled
+		case groupFiltered:
+			decision.included = false
+			decision.reason = ReasonGroupFiltered
+		case query.responsesWebsocket != nil && !snapshot.Groups[route.GroupID].ResponsesWebsocketEnabled:
+			decision.included = false
+			decision.reason = ReasonWebsocketDisabled
+		case !advisorModelsAllowed(snapshot.Groups[route.GroupID].Models, query):
+			decision.included = false
+			decision.reason = ReasonAdvisorModelUnavailable
+		}
+		if decision.included {
+			included++
+		}
+		decisions = append(decisions, decision)
+	}
+	if included > 0 {
+		return decisions, "", nil
+	}
+	reason := decisions[0].reason
+	for _, decision := range decisions[1:] {
+		if decision.reason != reason {
+			return decisions, ReasonNoAvailableGroup, nil
+		}
+	}
+	return decisions, reason, nil
+}
+
+func routeRequirementSatisfied(
+	query normalizedQuery,
+	route state.RouteTarget,
+) (bool, bool, ReasonCode) {
+	if !query.routeRequirement.Allows(execution.RouteMode(route.Mode)) {
+		return false, false, ReasonNativeRouteRequired
+	}
+	if query.responsesWebsocket != nil {
+		if query.clientProtocol == protocol.OpenAIResponses && query.operation == execution.OperationResponsesCreate &&
+			route.Mode == channel.RouteNative && route.ResolvedTarget.ResponsesWebsocket.Supports(*query.responsesWebsocket) {
+			return true, false, ""
+		}
+		return false, false, ReasonNativeRouteRequired
+	}
+	if query.operation != execution.OperationResponsesCreate {
+		return true, false, ""
+	}
+	if query.responsesStorePreference == execution.ResponsesStorePreferenceRequireStored {
+		if route.Mode == channel.RouteNative && route.ResolvedTarget.ResponsesStoreHandling(
+			protocol.OpenAIResponses, execution.OperationResponsesCreate,
+		) == channel.ResponsesStoreHandlingUpstreamManaged {
+			return true, false, ""
+		}
+		return false, false, ReasonNativeRouteRequired
+	}
+	if query.routeRequirement.Normalize() == execution.RouteRequirementNative {
+		if route.ResolvedTarget.SupportsResponsesLifecycle() {
+			return true, false, ""
+		}
+		return false, false, ReasonNativeRouteRequired
+	}
+	if query.responsesStorePreference != execution.ResponsesStorePreferencePreferStored {
+		return true, false, ""
+	}
+	handling := route.ResolvedTarget.ResponsesStoreHandling(
+		protocol.OpenAIResponses,
+		execution.OperationResponsesCreate,
+	)
+	switch handling {
+	case channel.ResponsesStoreHandlingUpstreamManaged:
+		return true, false, ""
+	case channel.ResponsesStoreHandlingStateless:
+		return true, true, ""
+	default:
+		return false, false, ReasonOperationUnsupported
+	}
+}
+
+// advisor 子推理用同一上游凭据执行并按 advisor 模型计费：该模型须由分组提供，
+// 且对外名称通过访问密钥的模型过滤。advisor 工具写的是上游模型 ID，按 ID 匹配。
+func advisorModelsAllowed(models []state.ModelConfig, query normalizedQuery) bool {
+	filter := query.accessKey.Filters.Models
+	for _, advisor := range query.advisorModels {
+		allowed := false
+		for _, model := range models {
+			if model.ID != advisor {
+				continue
+			}
+			if _, permitted := filter[model.ExternalName()]; len(filter) == 0 || permitted {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func accessKeyAllowsGroup(accessKey state.AccessKeyView, groupID uint) bool {
+	if len(accessKey.Filters.Groups) == 0 {
+		return true
+	}
+	_, allowed := accessKey.Filters.Groups[groupID]
+	return allowed
+}
+
+func effectiveWeight(groupManual, credentialManual *int) int64 {
+	groupWeight := state.ConfiguredWeight(groupManual)
+	credentialWeight := state.ConfiguredWeight(credentialManual)
+	if groupWeight <= 0 || credentialWeight <= 0 {
+		return 0
+	}
+	return int64(groupWeight) * int64(credentialWeight)
+}
+
+func inspectCredential(
+	group state.GroupCatalogView,
+	credential CredentialRuntimeView,
+	allowedCredentialIDs map[uint]struct{},
+	now time.Time,
+	model string,
+	operation execution.Operation,
+) CredentialInspection {
+	result := CredentialInspection{
+		CredentialID: credential.ID,
+		WeightManual: cloneWeight(credential.WeightManual),
+	}
+	if group.WeightManual != nil && *group.WeightManual == 0 {
+		result.Reason = ReasonGroupWeightZero
+		return result
+	}
+	if allowedCredentialIDs != nil {
+		if _, allowed := allowedCredentialIDs[credential.ID]; !allowed {
+			result.Reason = ReasonCredentialNotAllowed
+			return result
+		}
+	}
+	if credential.Status != state.CredentialStatusActive {
+		result.Reason = ReasonCredentialDisabled
+		return result
+	}
+	if !credential.AuthReady() {
+		result.Reason = ReasonCredentialAuthUnavailable
+		return result
+	}
+	if credential.WeightManual != nil && *credential.WeightManual == 0 {
+		result.Reason = ReasonCredentialWeightZero
+		return result
+	}
+	switch credential.RuntimeState(now) {
+	case state.CredentialRuntimeBlacklisted:
+		result.Reason = ReasonCredentialBlacklisted
+	case state.CredentialRuntimeCooldown:
+		result.Reason = ReasonCredentialCooldown
+		result.CooldownUntil = credential.CooldownUntil
+		if until := modelCooldownUntil(credential.ModelCooldowns, model, operation, now); until.After(result.CooldownUntil) {
+			result.CooldownUntil = until
+		}
+	default:
+		if until := modelCooldownUntil(credential.ModelCooldowns, model, operation, now); until.After(now) {
+			result.Reason, result.CooldownUntil = ReasonModelCooldown, until
+			return result
+		}
+		result.Available = true
+		result.EffectiveWeight = effectiveWeight(
+			group.WeightManual,
+			credential.WeightManual,
+		)
+	}
+	return result
+}
+
+func Inspect(
+	snapshot *state.ConfigSnapshot,
+	credentials []CredentialRuntimeView,
+	query Query,
+	now time.Time,
+) (Inspection, error) {
+	normalized := normalizeQuery(query)
+	result := Inspection{
+		ClientProtocol:   normalized.clientProtocol,
+		Operation:        normalized.operation,
+		RouteRequirement: normalized.routeRequirement,
+		ExternalModel:    cloneString(normalized.externalModel),
+		Groups:           []GroupInspection{},
+	}
+	if snapshot == nil {
+		return Inspection{}, fmt.Errorf("%w: nil ConfigSnapshot", ErrInconsistentSnapshot)
+	}
+	if normalized.accessKey.Status == state.AccessKeyStatusDisabled {
+		result.Reason = ReasonAccessKeyDisabled
+		return result, nil
+	}
+
+	credentialsByGroup := make(map[uint][]CredentialRuntimeView)
+	for _, credential := range credentials {
+		if _, exists := snapshot.GroupCatalog[credential.GroupID]; !exists {
+			return Inspection{}, fmt.Errorf(
+				"%w: registry credential %d group %d missing from catalog",
+				ErrInconsistentSnapshot,
+				credential.ID,
+				credential.GroupID,
+			)
+		}
+		cloned := credential
+		cloned.WeightManual = cloneWeight(credential.WeightManual)
+		credentialsByGroup[credential.GroupID] = append(credentialsByGroup[credential.GroupID], cloned)
+	}
+	for groupID := range credentialsByGroup {
+		sort.Slice(credentialsByGroup[groupID], func(i, j int) bool {
+			return credentialsByGroup[groupID][i].ID < credentialsByGroup[groupID][j].ID
+		})
+	}
+
+	decisions, staticReason, err := evaluateTargets(
+		snapshot,
+		snapshot.ExecutionRouteCatalog,
+		normalized,
+	)
+	if err != nil {
+		return Inspection{}, err
+	}
+	for _, decision := range decisions {
+		groupResult := GroupInspection{
+			GroupID: decision.group.ID, GroupName: decision.group.Name,
+			ChannelID:                 decision.target.ResolvedTarget.ChannelID,
+			RouteMode:                 decision.target.Mode,
+			RouteRequirementSatisfied: decision.requirementOK,
+			UpstreamModelID:           optionalModel(decision.target.UpstreamModelID),
+			Priority:                  decision.group.Priority,
+			WeightManual:              cloneWeight(decision.group.WeightManual),
+			Included:                  decision.included, Reason: decision.reason,
+			Credentials: []CredentialInspection{},
+		}
+		if !decision.included {
+			result.Groups = append(result.Groups, groupResult)
+			continue
+		}
+		groupCredentials := credentialsByGroup[decision.group.ID]
+		groupWeightZero := decision.group.WeightManual != nil &&
+			*decision.group.WeightManual == 0
+		for _, credential := range groupCredentials {
+			credentialResult := inspectCredential(
+				decision.group,
+				credential,
+				normalized.allowedCredentialIDs,
+				now,
+				decision.target.UpstreamModelID,
+				normalized.operation,
+			)
+			groupResult.Credentials = append(groupResult.Credentials, credentialResult)
+		}
+		for _, credential := range groupResult.Credentials {
+			if credential.Available && credential.EffectiveWeight > 0 {
+				groupResult.Routable = true
+				break
+			}
+		}
+		switch {
+		case groupWeightZero:
+			groupResult.Reason = ReasonGroupWeightZero
+		case len(groupCredentials) == 0:
+			groupResult.Reason = ReasonNoCredentials
+		case !groupResult.Routable:
+			groupResult.Reason = ReasonNoAvailableCredential
+		}
+		if groupResult.Routable {
+			result.Routable = true
+		}
+		result.Groups = append(result.Groups, groupResult)
+	}
+	if result.Routable {
+		return result, nil
+	}
+	if staticReason != "" {
+		result.Reason = staticReason
+	} else {
+		result.Reason = ReasonNoAvailableCredential
+	}
+	return result, nil
+}

@@ -1,0 +1,68 @@
+package modules
+
+import (
+	"gpt-load/internal/channel/spec"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/protocol"
+)
+
+const (
+	CodexSubscriptionDriver spec.SubscriptionDriverID = "codex"
+	CodexModelDiscovery     spec.UtilityID            = "codex_models"
+	CodexQuotaObservation   spec.UtilityID            = "codex_quota"
+	CodexResetCreditAction  spec.ActionID             = "codex_reset_credit"
+	CodexDefaultBaseURL                               = "https://chatgpt.com"
+)
+
+// Codex declares the subscription-backed Codex channel and its supported routes.
+func Codex() spec.Module {
+	return spec.Module{
+		Definition: spec.Definition{
+			ResponsesWebsocket: execution.WebsocketCapabilities{Native: true, Continuation: true, Prewarm: true, StoredResponses: false, Multiplex: false},
+
+			ID:          spec.Codex,
+			Name:        "Codex",
+			Mark:        "CX",
+			Icon:        "codex",
+			SearchTerms: []string{"subscription", "oauth", "chatgpt"},
+			Description: "OpenAI Codex subscription",
+			Connection: spec.Connection{
+				Type:            spec.ConnectionSubscription,
+				CredentialInput: "authorization",
+				AuthorizationMethods: []spec.AuthorizationMethod{
+					spec.AuthorizationBrowserOAuth,
+					spec.AuthorizationOAuthFile,
+				},
+			},
+			Params: []spec.Field{{
+				Key: "base_url", Label: "Base URL", InputKind: spec.InputURL,
+				Normalizer: spec.NormalizeOptionalHTTPSBaseURL,
+			}},
+			Credentials: []spec.Field{},
+			Provider: spec.ProviderBinding{
+				ProviderKind:    spec.ProviderCodex,
+				EndpointPolicy:  spec.EndpointSDKDefault,
+				DefaultBaseURLs: []string{CodexDefaultBaseURL},
+			},
+			Routes: []spec.Route{
+				spec.NewRoute(protocol.CodexLive, execution.OperationLiveCall, execution.RouteNative),
+				spec.NewRoute(protocol.OpenAICompletions, execution.OperationChatCompletion, execution.RouteConverted),
+				spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesGenerate, execution.RouteNative),
+				spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesEdit, execution.RouteNative),
+				spec.NewResponsesCreateRoute(execution.RouteNative, spec.ResponsesStoreHandlingStateless),
+				spec.NewRoute(protocol.OpenAIResponses, execution.OperationResponsesInputTokens, execution.RouteNative),
+				spec.NewRoute(protocol.OpenAIResponses, execution.OperationWebSearch, execution.RouteNative),
+				spec.NewRoute(protocol.Anthropic, execution.OperationChatCompletion, execution.RouteConverted),
+				spec.NewRoute(protocol.Anthropic, execution.OperationCountTokens, execution.RouteConverted),
+				spec.NewRoute(protocol.Gemini, execution.OperationChatCompletion, execution.RouteConverted),
+				spec.NewRoute(protocol.Gemini, execution.OperationCountTokens, execution.RouteConverted),
+			},
+			Capabilities: spec.CapabilityBindings{
+				SubscriptionDriver: CodexSubscriptionDriver,
+				ModelDiscovery:     CodexModelDiscovery,
+				QuotaObservation:   CodexQuotaObservation,
+				ResetCreditAction:  CodexResetCreditAction,
+			},
+		},
+	}
+}

@@ -1,474 +1,294 @@
+<div align="center">
+
+<img src="./web/public/favicon.svg" alt="GPT-Load" width="96">
+
 # GPT-Load
 
-English | [中文文档](README_CN.md)
+**A self-hosted AI gateway for multi-channel, multi-credential setups**
 
-[![Release](https://img.shields.io/github/v/release/tbphp/gpt-load)](https://github.com/tbphp/gpt-load/releases)
-![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+API keys, subscription accounts, traffic scheduling, failure handling, request logs, and usage accounting — behind a single entry point.
 
-A high-performance, enterprise-grade AI API transparent proxy service designed specifically for enterprises and developers who need to integrate multiple AI services. Built with Go, featuring intelligent key management, load balancing, and comprehensive monitoring capabilities, designed for high-concurrency production environments.
+English · [中文](README_CN.md) · [日本語](README_JP.md) | [Official Website](https://www.gpt-load.com)
 
-For detailed documentation, please visit [Official Documentation](https://www.gpt-load.com/docs?lang=en)
+[![Release](https://img.shields.io/github/v/tag/tbphp/gpt-load?filter=v2.*)](https://github.com/tbphp/gpt-load/releases)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Ftbphp%2Fgpt--load%3A2-2496ED?logo=docker&logoColor=white)](https://github.com/tbphp/gpt-load/pkgs/container/gpt-load)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<a href="https://hellogithub.com/repository/tbphp/gpt-load" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=554dc4c46eb14092b9b0c56f1eb9021c&claim_uid=Qlh8vzrWJ0HCneG" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+<a href="https://trendshift.io/repositories/14880" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14880" alt="tbphp/gpt-load | Trendshift" width="220" height="48"/></a>
+<a href="https://hellogithub.com/repository/tbphp/gpt-load" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=554dc4c46eb14092b9b0c56f1eb9021c&claim_uid=Qlh8vzrWJ0HCneG" alt="Featured｜HelloGitHub" width="220" height="47"/></a>
 
-## Features
+</div>
 
-- **Transparent Proxy**: Complete preservation of native API formats, supporting OpenAI, Google Gemini, and Anthropic Claude among other formats
-- **Intelligent Key Management**: High-performance key pool with group-based management, automatic rotation, and failure recovery
-- **Load Balancing**: Weighted load balancing across multiple upstream endpoints to enhance service availability
-- **Smart Failure Handling**: Automatic key blacklist management and recovery mechanisms to ensure service continuity
-- **Dynamic Configuration**: System settings and group configurations support hot-reload without requiring restarts
-- **Enterprise Architecture**: Distributed leader-follower deployment supporting horizontal scaling and high availability
-- **Modern Management**: Vue 3-based web management interface that is intuitive and user-friendly
-- **Comprehensive Monitoring**: Real-time statistics, health checks, and detailed request logging
-- **High-Performance Design**: Zero-copy streaming, connection pool reuse, and atomic operations
-- **Production Ready**: Graceful shutdown, error recovery, and comprehensive security mechanisms
-- **Dual Authentication**: Separate authentication for management and proxy, with proxy authentication supporting global and group-level keys
+---
 
-## Supported AI Services
+## Sponsors
 
-GPT-Load serves as a transparent proxy service, completely preserving the native API formats of various AI service providers:
+<sub>[Become a sponsor](mailto:tangb7420@gmail.com)</sub>
 
-- **OpenAI Format**: Official OpenAI API, Azure OpenAI, and other OpenAI-compatible services
-- **Google Gemini Format**: Native APIs for Gemini Pro, Gemini Pro Vision, and other models
-- **Anthropic Claude Format**: Claude series models, supporting high-quality conversations and text generation
+<details open>
+<summary>Sponsor details (collapsible)</summary>
 
-## Quick Start
+<a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=gptload" target="_blank" rel="sponsored noopener noreferrer"><img src="./screenshot/modelflare-banner-en.png" alt="Modelflare"></a>
 
-### System Requirements
+Thanks to Modelflare for sponsoring this project! Modelflare: Full strength, stable, nothing watered down. Global SOTA models at a lower cost. Operated by US-based Havenbyte LLC, Modelflare supports GPT, Claude, Gemini, Grok, and other leading models through common compatible protocols, plus 40+ image and video models.
 
-- Go 1.23+ (for source builds)
-- Docker (for containerized deployment)
-- MySQL, PostgreSQL, or SQLite (for database storage)
-- Redis (for caching and distributed coordination, optional)
+**Cache compensation** is a highlight: selected OpenAI groups (price-first, stable, and premium) guarantee daily cache hit rates of 65%, 75%, or 85%, and if eligible requests fall short, Modelflare refunds the difference, visible on the usage dashboard after settlement.
 
-### Method 1: Docker Quick Start
+**Special offers**: a single top-up of US&#36;20 unlocks the GPT discount group at a 0.015x price multiplier, and a single top-up of US&#36;50 unlocks the Claude discount group at a 0.03x multiplier. Register via <a href="https://modelflare.dev/sign-up?utm_source=github&amp;utm_campaign=gptload" target="_blank" rel="sponsored noopener noreferrer">this exclusive link</a> to get started.
+
+---
+
+<table>
+<tbody>
+<tr>
+<td width="180"><a href="https://ofox.ai/?utm_source=github&amp;utm_medium=sponsorship&amp;utm_content=gpt_load" target="_blank" rel="noopener noreferrer"><img src="./screenshot/ofoxai.svg" alt="OfoxAI" width="150"></a></td>
+<td><strong>OfoxAI: Text, image, and video AI in one platform</strong><br>OfoxAI is a unified AI API platform bringing together text, image, and video models from multiple providers. With OpenAI-compatible endpoints and native Anthropic and Gemini interfaces, developers can access models for AI applications, agents, and content creation through one platform. <a href="https://ofox.ai/?utm_source=github&amp;utm_medium=sponsorship&amp;utm_content=gpt_load" target="_blank" rel="noopener noreferrer">Explore OfoxAI models and APIs →</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.packyapi.ai/register?aff=ahiS" target="_blank" rel="sponsored noopener noreferrer"><picture><source media="(prefers-color-scheme: dark)" srcset="./screenshot/packycode-dark.png"><source media="(prefers-color-scheme: light)" srcset="./screenshot/packycode-light.png"><img src="./screenshot/packycode-light.png" alt="PackyCode" width="150"></picture></a></td>
+<td><strong>PackyCode</strong><br>Access leading AI models through PackyCode with one API endpoint and one API key. Enjoy fast, reliable access with automatic failover and dedicated high-speed routes for Codex and Claude Code. Get started with $1 in free credits, a discount on your first top-up, and savings of up to 80% on eligible routes. Pay in RMB with no currency conversion markups or extra top-up fees. <a href="https://www.packyapi.ai/register?aff=ahiS" target="_blank" rel="sponsored noopener noreferrer">Sign up through the link and start building today.</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.axisnow.io/zh"><img src="./screenshot/axisnow.jpg" alt="AxisNow" width="150"></a></td>
+<td>Protect and accelerate websites and APIs, <strong>serving users in mainland China</strong> and around the world, and extend acceleration and security capabilities to native/mobile apps through a client SDK — <strong>self-built private-deployment CDN | subscription-based high-protection CDN | an independently controllable, flexibly composable CDN network.</strong></td>
+</tr>
+<tr>
+<td width="180"><a href="https://go.apimart.ai/gh-gpt-load"><img src="./screenshot/apimart.png" alt="APIMart" width="150"></a></td>
+<td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-gpt-load">sign up here</a> to get started.</td>
+</tr>
+</tbody>
+</table>
+
+</details>
+
+## Why GPT-Load
+
+Your application only needs one base URL and one AccessKey. Providers, accounts, credentials, models, and routing policy are all configured in the management UI.
+
+<img src="./screenshot/architecture-overview.svg" alt="GPT-Load unified access and upstream routing architecture" width="860">
+
+- **One gateway, native protocols** — Manage official APIs, cloud platforms, model services, and compatible relays together while clients keep their OpenAI, Anthropic, or Gemini native interfaces.
+- **One mechanism for API keys and subscriptions** — Codex, Claude, Antigravity, Grok, and API-key channels share credential management, scheduling, and health handling.
+- **Scheduling and failure isolation built in** — Multi-credential scheduling, configurable weights, retries, cooldown, blacklisting, and session affinity reduce the impact of overloaded or failing credentials.
+- **Observable, self-hosted, and simple to deploy** — Inspect health, routes, logs, usage, and cost estimates in an embedded UI backed by SQLite, MySQL, or PostgreSQL with local credential encryption.
+
+## Quick start
+
+> [!WARNING]
+> If you are using 1.x, read [Moving from 1.x](#moving-from-1x) first. 2.0 cannot open, import, or migrate 1.x data in place.
+
+### 1. Start the service
+
+Requires Docker and Docker Compose.
 
 ```bash
-docker run -d --name gpt-load \
-    -p 3001:3001 \
-    -e AUTH_KEY=your-secure-key-here \
-    -v "$(pwd)/data":/app/data \
-    ghcr.io/tbphp/gpt-load:latest
-```
+git clone --depth 1 https://github.com/tbphp/gpt-load.git
+cd gpt-load
 
-> Please change `your-secure-key-here` to a strong password (never use the default value), then you can log in to the management interface: <http://localhost:3001>
-
-### Method 2: Using Docker Compose (Recommended)
-
-**Installation Commands:**
-
-```bash
-# Create Directory
-mkdir -p gpt-load && cd gpt-load
-
-# Download configuration files
-wget https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/tbphp/gpt-load/refs/heads/main/.env.example
-
-# Edit the .env file and change AUTH_KEY to a strong password. Never use default or simple keys like sk-123456.
-
-# Start services
+cp .env.example .env
 docker compose up -d
 ```
 
-Before deployment, you must change the default admin key (AUTH_KEY). A recommended format is: sk-prod-[32-character random string].
-
-The default installation uses the SQLite version, which is suitable for lightweight, single-instance applications.
-
-If you need to install MySQL, PostgreSQL, and Redis, please uncomment the required services in the `docker-compose.yml` file, configure the corresponding environment variables, and restart.
-
-**Other Commands:**
+Confirm the service is up:
 
 ```bash
-# Check service status
-docker compose ps
-
-# View logs
-docker compose logs -f
-
-# Restart Service
-docker compose down && docker compose up -d
-
-# Update to latest version
-docker compose pull && docker compose down && docker compose up -d
+curl --fail http://127.0.0.1:3001/health
 ```
 
-After deployment:
-
-- Access Web Management Interface: <http://localhost:3001>
-- API Proxy Address: <http://localhost:3001/proxy>
-
-> Use your modified AUTH_KEY to log in to the management interface.
-
-### Method 3: Source Build
-
-Source build requires a locally installed database (SQLite, MySQL, or PostgreSQL) and Redis (optional).
+The first start generates a management key. Read it and store it safely:
 
 ```bash
-# Clone and build
-git clone https://github.com/tbphp/gpt-load.git
-cd gpt-load
-go mod tidy
-
-# Create configuration
-cp .env.example .env
-
-# Edit the .env file and change AUTH_KEY to a strong password. Never use default or simple keys like sk-123456.
-# Modify DATABASE_DSN and REDIS_DSN configurations in .env
-# REDIS_DSN is optional; if not configured, memory storage will be enabled
-
-# Run
-make run
+docker compose exec gpt-load sh -c 'cat /app/data/auth.key'
 ```
 
-After deployment:
+Open <http://127.0.0.1:3001> and sign in to the console with that key.
 
-- Access Web Management Interface: <http://localhost:3001>
-- API Proxy Address: <http://localhost:3001/proxy>
+> You can also set `AUTH_KEY` explicitly in `.env` before starting. By default the service listens on the loopback address only and is not exposed to the internet.
 
-> Use your modified AUTH_KEY to log in to the management interface.
+### 2. Initial configuration
 
-### Method 4: Cluster Deployment
+Initial setup takes three steps:
 
-Cluster deployment requires all nodes to connect to the same MySQL (or PostgreSQL) and Redis, with Redis being mandatory. It's recommended to use unified distributed MySQL and Redis clusters.
-
-**Deployment Requirements:**
-
-- All nodes must configure identical `AUTH_KEY`, `DATABASE_DSN`, `REDIS_DSN`
-- Leader-follower architecture where follower nodes must configure environment variable: `IS_SLAVE=true`
-
-For details, please refer to [Cluster Deployment Documentation](https://www.gpt-load.com/docs/cluster?lang=en)
-
-## Configuration System
-
-### Configuration Architecture Overview
-
-GPT-Load adopts a dual-layer configuration architecture:
-
-#### 1. Static Configuration (Environment Variables)
-
-- **Characteristics**: Read at application startup, immutable during runtime, requires application restart to take effect
-- **Purpose**: Infrastructure configuration such as database connections, server ports, authentication keys, etc.
-- **Management**: Set via `.env` files or system environment variables
-
-#### 2. Dynamic Configuration (Hot-Reload)
-
-- **System Settings**: Stored in database, providing unified behavioral standards for the entire application
-- **Group Configuration**: Behavior parameters customized for specific groups, can override system settings
-- **Configuration Priority**: Group Configuration > System Settings > Environment Configuration
-- **Characteristics**: Supports hot-reload, takes effect immediately after modification without application restart
+1. **Add a channel** — Choose an upstream service and add one or more API keys. For subscription channels, complete the OAuth flow or import credentials as prompted.
+2. **Create a group** — Pick a channel, then configure available models and runtime policy.
+3. **Create an AccessKey** — Set the groups and client protocols it may use, then give the generated AccessKey to your application.
 
 <details>
-<summary>Static Configuration (Environment Variables)</summary>
+<summary>OAuth callback ports for subscription channels</summary>
 
-**Server Configuration:**
+The Codex, Claude, and Antigravity OAuth clients use fixed callback ports. Compose publishes them on the address configured by `HOST`, which defaults to `127.0.0.1`; setting `HOST=0.0.0.0` also publishes these callback ports on all host interfaces. Because the ports are fixed by the upstream clients, only one default Compose instance can run on a host at a time.
 
-| Setting                   | Environment Variable               | Default         | Description                                     |
-| ------------------------- | ---------------------------------- | --------------- | ----------------------------------------------- |
-| Service Port              | `PORT`                             | 3001            | HTTP server listening port                      |
-| Service Address           | `HOST`                             | 0.0.0.0         | HTTP server binding address                     |
-| Read Timeout              | `SERVER_READ_TIMEOUT`              | 60              | HTTP server read timeout (seconds)              |
-| Write Timeout             | `SERVER_WRITE_TIMEOUT`             | 600             | HTTP server write timeout (seconds)             |
-| Idle Timeout              | `SERVER_IDLE_TIMEOUT`              | 120             | HTTP connection idle timeout (seconds)          |
-| Graceful Shutdown Timeout | `SERVER_GRACEFUL_SHUTDOWN_TIMEOUT` | 10              | Service graceful shutdown wait time (seconds)   |
-| Follower Mode             | `IS_SLAVE`                         | false           | Follower node identifier for cluster deployment |
-| Timezone                  | `TZ`                               | `Asia/Shanghai` | Specify timezone                                |
-
-**Authentication & Database Configuration:**
-
-| Setting             | Environment Variable | Default              | Description                                         |
-| ------------------- | -------------------- | -------------------- | --------------------------------------------------- |
-| Admin Key           | `AUTH_KEY`           | `sk-123456`          | Access authentication key for the **management end**, please change it to a strong password |
-| Database Connection | `DATABASE_DSN`       | `./data/gpt-load.db` | Database connection string (DSN) or file path       |
-| Redis Connection    | `REDIS_DSN`          | -                    | Redis connection string, uses memory storage when empty |
-
-**Performance & CORS Configuration:**
-
-| Setting                 | Environment Variable      | Default                       | Description                                     |
-| ----------------------- | ------------------------- | ----------------------------- | ----------------------------------------------- |
-| Max Concurrent Requests | `MAX_CONCURRENT_REQUESTS` | 100                           | Maximum concurrent requests allowed by system   |
-| Enable CORS             | `ENABLE_CORS`             | true                          | Whether to enable Cross-Origin Resource Sharing |
-| Allowed Origins         | `ALLOWED_ORIGINS`         | `*`                           | Allowed origins, comma-separated                |
-| Allowed Methods         | `ALLOWED_METHODS`         | `GET,POST,PUT,DELETE,OPTIONS` | Allowed HTTP methods                            |
-| Allowed Headers         | `ALLOWED_HEADERS`         | `*`                           | Allowed request headers, comma-separated        |
-| Allow Credentials       | `ALLOW_CREDENTIALS`       | false                         | Whether to allow sending credentials            |
-
-**Logging Configuration:**
-
-| Setting             | Environment Variable | Default               | Description                         |
-| ------------------- | -------------------- | --------------------- | ----------------------------------- |
-| Log Level           | `LOG_LEVEL`          | `info`                | Log level: debug, info, warn, error |
-| Log Format          | `LOG_FORMAT`         | `text`                | Log format: text, json              |
-| Enable File Logging | `LOG_ENABLE_FILE`    | false                 | Whether to enable file log output   |
-| Log File Path       | `LOG_FILE_PATH`      | `./data/logs/app.log` | Log file storage path               |
-
-**Proxy Configuration:**
-
-GPT-Load automatically reads proxy settings from environment variables to make requests to upstream AI providers.
-
-| Setting     | Environment Variable | Default | Description                                     |
-| ----------- | -------------------- | ------- | ----------------------------------------------- |
-| HTTP Proxy  | `HTTP_PROXY`         | -       | Proxy server address for HTTP requests          |
-| HTTPS Proxy | `HTTPS_PROXY`        | -       | Proxy server address for HTTPS requests         |
-| No Proxy    | `NO_PROXY`           | -       | Comma-separated list of hosts or domains to bypass the proxy |
-
-Supported Proxy Protocol Formats:
-
-- **HTTP**: `http://user:pass@host:port`
-- **HTTPS**: `https://user:pass@host:port`
-- **SOCKS5**: `socks5://user:pass@host:port`
-</details>
-
-<details>
-<summary>Dynamic Configuration (Hot-Reload)</summary>
-
-**Basic Settings:**
-
-| Setting            | Field Name                           | Default                 | Group Override | Description                                  |
-| ------------------ | ------------------------------------ | ----------------------- | -------------- | -------------------------------------------- |
-| Project URL        | `app_url`                            | `http://localhost:3001` | ❌             | Project base URL                             |
-| Global Proxy Keys  | `proxy_keys`                         | Initial value from `AUTH_KEY` | ❌         | Globally effective proxy keys, comma-separated |
-| Log Retention Days | `request_log_retention_days`         | 7                       | ❌             | Request log retention days, 0 for no cleanup |
-| Log Write Interval | `request_log_write_interval_minutes` | 1                       | ❌             | Log write to database cycle (minutes)        |
-| Enable Request Body Logging | `enable_request_body_logging` | false | ✅ | Whether to log complete request body content in request logs |
-
-**Request Settings:**
-
-| Setting                       | Field Name                | Default | Group Override | Description                                                         |
-| ----------------------------- | ------------------------- | ------- | -------------- | ------------------------------------------------------------------- |
-| Request Timeout               | `request_timeout`         | 600     | ✅             | Forward request complete lifecycle timeout (seconds)                |
-| Connection Timeout            | `connect_timeout`         | 15      | ✅             | Timeout for establishing connection with upstream service (seconds) |
-| Idle Connection Timeout       | `idle_conn_timeout`       | 120     | ✅             | HTTP client idle connection timeout (seconds)                       |
-| Response Header Timeout       | `response_header_timeout` | 600     | ✅             | Timeout for waiting upstream response headers (seconds)             |
-| Max Idle Connections          | `max_idle_conns`          | 100     | ✅             | Connection pool maximum total idle connections                      |
-| Max Idle Connections Per Host | `max_idle_conns_per_host` | 50      | ✅             | Maximum idle connections per upstream host                          |
-| Proxy URL                     | `proxy_url`               | -       | ✅             | HTTP/HTTPS proxy for forwarding requests, uses environment if empty |
-
-**Key Configuration:**
-
-| Setting                    | Field Name                        | Default | Group Override | Description                                                                |
-| -------------------------- | --------------------------------- | ------- | -------------- | -------------------------------------------------------------------------- |
-| Max Retries                | `max_retries`                     | 3       | ✅             | Maximum retry count using different keys for single request                |
-| Blacklist Threshold        | `blacklist_threshold`             | 3       | ✅             | Number of consecutive failures before key enters blacklist                 |
-| Key Validation Interval    | `key_validation_interval_minutes` | 60      | ✅             | Background scheduled key validation cycle (minutes)                        |
-| Key Validation Concurrency | `key_validation_concurrency`      | 10      | ✅             | Concurrency for background validation of invalid keys                      |
-| Key Validation Timeout     | `key_validation_timeout_seconds`  | 20      | ✅             | API request timeout for validating individual keys in background (seconds) |
+When working over SSH or from a remote browser, the browser's `localhost` may not reach GPT-Load — paste the full callback URL into the authorization dialog to finish the flow.
 
 </details>
 
-## Web Management Interface
+## Screenshots
 
-Access the management console at: <http://localhost:3001> (default address)
+**Groups** — View channels, models, credential counts, traffic, and health in one place
 
-### Interface Overview
+<img src="./screenshot/groups-en-US.png" alt="GPT-Load modern groups overview" width="860">
 
-<img src="screenshot/dashboard.png" alt="Dashboard" width="600"/>
+**Usage statistics** — Review request trends, cache hit rate, token categories, and cost estimates
 
-<br/>
+<img src="./screenshot/usage-en-US.png" alt="GPT-Load modern usage statistics" width="860">
 
-<img src="screenshot/keys.png" alt="Key Management" width="600"/>
+## Scope
 
-<br/>
+### Client protocols
 
-The web management interface provides the following features:
+| Protocol                | Main entry                                                         |
+| ----------------------- | ------------------------------------------------------------------ |
+| OpenAI Chat Completions | `POST /v1/chat/completions`                                        |
+| OpenAI Responses        | `/v1/responses` and its resource paths                             |
+| OpenAI Images           | `POST /v1/images/...`                                              |
+| OpenAI Embeddings       | `POST /v1/embeddings`                                              |
+| Rerank                  | `POST /v1/rerank`                                                  |
+| Audio Speech            | `POST /v1/audio/speech`                                            |
+| Mistral native          | `/v1/ocr`, `/v1/audio/transcriptions` |
+| Anthropic Messages      | `POST /v1/messages`                                                |
+| Gemini                  | `/v1beta/models/...`                                               |
+| Gemini Embeddings       | `POST /v1beta/models/{model}:embedContent` / `:batchEmbedContents` |
 
-- **Dashboard**: Real-time statistics and system status overview
-- **Key Management**: Create and configure AI service provider groups, add, delete, and monitor API keys
-- **Request Logs**: Detailed request history and debugging information
-- **System Settings**: Global configuration management and hot-reload
+### Built-in channels
 
-## API Usage Guide
+- **Official and cloud** — OpenAI, Anthropic, Gemini, xAI, Azure OpenAI, AWS Bedrock, Google Vertex AI
+- **Model services** — DeepSeek, Moonshot AI, SiliconFlow, Zhipu AI, Alibaba, Volcengine, OpenRouter, Cline, Groq, Cerebras, Mistral, Nebius, Parasail, Wafer, Hugging Face (Chat), Cohere (text reranking), OpenCode Go, OpenCode Zen
+- **Subscription** — Codex, Claude, Antigravity, Grok
+- **Custom** — OpenAI Compatible (any compatible relay)
+
+## Deployment and data
+
+Docker Compose uses application-managed SQLite by default. Data lives in the `gpt-load-data` named volume and includes the database, `auth.key`, and `encryption.key`.
+
+> [!IMPORTANT]
+> `encryption.key` decrypts channel credentials. When backing up or migrating, the database and the key **must be kept together**. Once the key is lost or replaced, existing encrypted credentials cannot be recovered, and this version does not support master key rotation.
 
 <details>
-<summary>Proxy Interface Invocation</summary>
+<summary>Using an external database</summary>
 
-GPT-Load routes requests to different AI services through group names. Usage is as follows:
-
-### 1. Proxy Endpoint Format
+Use the unified `DATABASE_DSN` to connect SQLite, MySQL, or PostgreSQL:
 
 ```text
-http://localhost:3001/proxy/{group_name}/{original_api_path}
+mysql://user:password@db.example:3306/gpt_load?charset=utf8mb4&collation=utf8mb4_bin
+postgres://user:password@db.example:5432/gpt_load?sslmode=require
 ```
-
-- `{group_name}`: Group name created in the management interface
-- `{original_api_path}`: Maintain complete consistency with original AI service paths
-
-### 2. Authentication Methods
-
-Configure **Proxy Keys** in the web management interface, which supports system-level and group-level proxy keys.
-
-- **Authentication Method**: Consistent with the native API, but replace the original key with the configured proxy key.
-- **Key Scope**: **Global Proxy Keys** configured in system settings can be used in all groups. **Group Proxy Keys** configured in a group are only valid for the current group.
-- **Format**: Multiple keys are separated by commas.
-
-### 3. OpenAI Interface Example
-
-Assuming a group named `openai` was created:
-
-**Original invocation:**
-
-```bash
-curl -X POST https://api.openai.com/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-openai-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**Proxy invocation:**
-
-```bash
-curl -X POST http://localhost:3001/proxy/openai/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**Changes required:**
-
-- Replace `https://api.openai.com` with `http://localhost:3001/proxy/openai`
-- Replace original API Key with the **Proxy Key**
-
-### 4. Gemini Interface Example
-
-Assuming a group named `gemini` was created:
-
-**Original invocation:**
-
-```bash
-curl -X POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=your-gemini-key \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'
-```
-
-**Proxy invocation:**
-
-```bash
-curl -X POST http://localhost:3001/proxy/gemini/v1beta/models/gemini-2.5-pro:generateContent?key=your-proxy-key \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'
-```
-
-**Changes required:**
-
-- Replace `https://generativelanguage.googleapis.com` with `http://localhost:3001/proxy/gemini`
-- Replace `key=your-gemini-key` in URL parameter with the **Proxy Key**
-
-### 5. Anthropic Interface Example
-
-Assuming a group named `anthropic` was created:
-
-**Original invocation:**
-
-```bash
-curl -X POST https://api.anthropic.com/v1/messages \
-  -H "x-api-key: sk-ant-api03-your-anthropic-key" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**Proxy invocation:**
-
-```bash
-curl -X POST http://localhost:3001/proxy/anthropic/v1/messages \
-  -H "x-api-key: your-proxy-key" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-**Changes required:**
-
-- Replace `https://api.anthropic.com` with `http://localhost:3001/proxy/anthropic`
-- Replace the original API Key in `x-api-key` header with the **Proxy Key**
-
-### 6. Supported Interfaces
-
-**OpenAI Format:**
-
-- `/v1/chat/completions` - Chat conversations
-- `/v1/completions` - Text completion
-- `/v1/embeddings` - Text embeddings
-- `/v1/models` - Model list
-- And all other OpenAI-compatible interfaces
-
-**Gemini Format:**
-
-- `/v1beta/models/*/generateContent` - Content generation
-- `/v1beta/models` - Model list
-- And all other Gemini native interfaces
-
-**Anthropic Format:**
-
-- `/v1/messages` - Message conversations
-- `/v1/models` - Model list (if available)
-- And all other Anthropic native interfaces
-
-### 7. Client SDK Configuration
-
-**OpenAI Python SDK:**
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="your-proxy-key",  # Use the proxy key
-    base_url="http://localhost:3001/proxy/openai"  # Use proxy endpoint
-)
-
-response = client.chat.completions.create(
-    model="gpt-4.1-mini",
-    messages=[{"role": "user", "content": "Hello"}]
-)
-```
-
-**Google Gemini SDK (Python):**
-
-```python
-import google.generativeai as genai
-
-# Configure API key and base URL
-genai.configure(
-    api_key="your-proxy-key",  # Use the proxy key
-    client_options={"api_endpoint": "http://localhost:3001/proxy/gemini"}
-)
-
-model = genai.GenerativeModel('gemini-2.5-pro')
-response = model.generate_content("Hello")
-```
-
-**Anthropic SDK (Python):**
-
-```python
-from anthropic import Anthropic
-
-client = Anthropic(
-    api_key="your-proxy-key",  # Use the proxy key
-    base_url="http://localhost:3001/proxy/anthropic"  # Use proxy endpoint
-)
-
-response = client.messages.create(
-    model="claude-sonnet-4-20250514",
-    messages=[{"role": "user", "content": "Hello"}]
-)
-```
-
-> **Important Note**: As a transparent proxy service, GPT-Load completely preserves the native API formats and authentication methods of various AI services. You only need to replace the endpoint address and use the **Proxy Key** configured in the management interface for seamless migration.
 
 </details>
 
-## Contributing
+Common operations:
 
-Thanks to all the developers who have contributed to GPT-Load!
+```bash
+docker compose logs -f      # view logs
+docker compose pull && docker compose up -d   # update to the latest 2.x image
+docker compose stop         # stop the service
+```
 
-[![Contributors](https://contrib.rocks/image?repo=tbphp/gpt-load)](https://github.com/tbphp/gpt-load/graphs/contributors)
+The official Compose file uses `ghcr.io/tbphp/gpt-load:2`. Before GA, `2` tracks verified 2.0 Beta and RC releases; after GA, it tracks stable 2.x releases only. Exact image tags omit the Git tag's `v` prefix (for example, `2.0.0-beta.25`), while `2.0-beta` remains the 2.0 Beta channel. `latest` remains on 1.x.
 
-## License
+<details>
+<summary>Using a native binary</summary>
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Download the build for your platform from [GitHub Releases](https://github.com/tbphp/gpt-load/releases), and verify it against the bundled `SHA256SUMS` first:
 
-## Star History
+```bash
+chmod +x ./gpt-load-linux-amd64
 
-[![Stargazers over time](https://starchart.cc/tbphp/gpt-load.svg?variant=adaptive)](https://starchart.cc/tbphp/gpt-load)
+HOST=127.0.0.1 DATA_DIR=./data ./gpt-load-linux-amd64
+```
+
+Then open <http://127.0.0.1:3001>. Portable builds are provided for five targets across Linux, macOS (amd64 / arm64), and Windows; `gpt-load-windows-amd64.exe` keeps running in the foreground as before.
+
+Windows desktop users can instead download `gpt-load-windows-setup.exe`. After one administrator approval, Setup installs and starts a low-privilege Windows service, enables automatic startup, and creates desktop and Start Menu shortcuts to the GPT-Load management page. Setup displays the generated management key before it finishes; save it before closing the page. The protected copy remains at `%ProgramData%\GPT-Load\data\auth.key`. Service configuration and its `.env` live in `%ProgramData%\GPT-Load`, with persistent data in `%ProgramData%\GPT-Load\data`.
+
+Installing a newer Setup stops the service gracefully before updating it. Windows uninstall removes the program and service but preserves data. Advanced users can still manage an installed service with `gpt-load-windows-amd64.exe service start|stop|restart|status`.
+
+</details>
+
+### Environment configuration
+
+At startup, the application reads `.env` in the current directory; existing process environment variables take precedence. Unless noted otherwise, changes require restarting the process or container; see [`.env.example`](.env.example) for the common configuration template.
+
+<details>
+<summary>Show all environment variables</summary>
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Native listening address, and the default host address for Compose's main port and OAuth callback ports; Compose always listens on `0.0.0.0` inside the container. |
+| `PORT` | `3001` | HTTP service port, must be `1–65535`; Compose also uses it for the container port, host publishing, and health check. |
+| `BIND_ADDRESS` | Empty, inherits `HOST` | Compose only; overrides the host publishing address for the main service port without changing OAuth callback ports. |
+| `OAUTH_CALLBACK_BIND_ADDRESS` | Empty, inherits `HOST` | Compose only; overrides the host publishing address for the fixed OAuth callback ports `1455`, `54545`, and `51121`. |
+| `GRACEFUL_SHUTDOWN_TIMEOUT` | `10` | Maximum time to wait for requests after a stop signal, positive integer in seconds. |
+| `CONTAINER_STOP_GRACE_PERIOD` | `15s` | Docker duration to wait before Compose force-stops the container; should be longer than `GRACEFUL_SHUTDOWN_TIMEOUT`. |
+| `READ_TIMEOUT` | `60` | HTTP request read timeout, positive integer in seconds. |
+| `IDLE_TIMEOUT` | `120` | HTTP keep-alive idle connection timeout, positive integer in seconds. |
+| `DATA_DIR` | `./data` | Directory for the managed database, `auth.key`, `encryption.key`, and runtime state; official Compose uses `/app/data`, while the Windows Setup service uses `%ProgramData%\GPT-Load\data`. |
+| `DATABASE_DSN` | Empty, uses `${DATA_DIR}/gpt-load.db` | Empty uses application-managed SQLite; non-empty values support SQLite paths or URLs, MySQL URLs, and PostgreSQL URLs, and are treated as operator-managed external databases. Container file paths must be inside a mounted directory. |
+| `DATABASE_MAX_OPEN_CONNECTIONS` | `10` | Maximum open connections for MySQL and PostgreSQL, positive integer. SQLite always uses one connection. |
+| `DATABASE_MAX_IDLE_CONNECTIONS` | `5` | Maximum idle connections for MySQL and PostgreSQL, positive integer and no greater than `DATABASE_MAX_OPEN_CONNECTIONS`. SQLite always uses one connection. |
+| `AUTH_KEY` | Empty, reads or generates `${DATA_DIR}/auth.key` | Bearer key for the management UI and `/api` management API, not a data-plane AccessKey. |
+| `ENCRYPTION_KEY` | Empty, reads or generates `${DATA_DIR}/encryption.key` | Encrypts channel credentials; changing or losing it makes existing credentials undecryptable, so back it up with the database. |
+| `CLIENT_IP_HEADER` | Empty, uses the connection IP | Client IP header, such as `X-Forwarded-For` or `CF-Connecting-IP`; missing or invalid values fall back to the connection IP. Shared by logs, AccessKey IP restrictions, and other IP consumers; supports IPv4/IPv6. Restart after changes. |
+| `TRUSTED_PROXIES` | Empty | Optional comma-separated proxy IPs or CIDRs; applies only with `CLIENT_IP_HEADER`. Empty means trusting the selected header directly, with trust enforced by your deployment. When set, only matching connection peers may supply the header; others use their connection IP. For `X-Forwarded-For`, scan right to left for the first untrusted IP (leftmost if all are trusted); without a list, use the leftmost IP. Other headers accept one IP only. Restart after changes. |
+| `HTTP_PROXY` | Empty | Environment proxy for HTTP upstream requests. |
+| `HTTPS_PROXY` | Empty | Environment proxy for HTTPS upstream requests. |
+| `NO_PROXY` | Empty | Comma-separated hosts, domains, or IPs that bypass the environment proxy. |
+| `LOG_LEVEL` | `info` | Supports `panic`, `fatal`, `error`, `warn`, `warning`, `info`, `debug`, and `trace`; invalid values warn and fall back to `info`. |
+| `LOG_FORMAT` | `text` | Supports `text` and `json`; any other value fails startup. |
+| `MODELS_DEV_AUTO_SYNC_ENABLED` | Unset, initial default `true` | When unset, uses the persisted management UI setting; when set, forces Models.dev auto-sync on or off and makes the same UI option read-only. |
+
+Environment proxies apply only when no proxy is specified on the credential, group, or global settings.
+
+</details>
+
+## Moving from 1.x
+
+> [!WARNING]
+> GPT-Load 2.0 is a complete rewrite. It **cannot** open, import, or migrate 1.x data in place.
+
+Deploy 2.0 with its own database, `DATA_DIR`, port, and Docker volume. Cut traffic over only after verification, and keep the original 1.x deployment until the rollback window closes. Documentation for the 1.4.x maintenance line is at the [official docs](https://www.gpt-load.com/docs).
+
+## Open-source dependencies
+
+Some of GPT-Load's capabilities build on these projects, with thanks:
+
+| Project                                                     | Role                                                                                 | License    |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------- |
+| [Bifrost Core](https://github.com/maximhq/bifrost)          | Provider authentication, request/response conversion, streaming, usage normalization | Apache-2.0 |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | OAuth and execution adapter for subscription channels                                | MIT        |
+| [Lobe Icons](https://github.com/lobehub/lobe-icons)         | Channel brand icons in the management UI                                             | MIT        |
+
+GPT-Load owns credential storage, account selection, scheduling, retry, health, affinity, logging, and usage policy. Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), full license texts in [`LICENSES/`](LICENSES/), and each release ships a CycloneDX SBOM covering the Go dependency graph.
+
+Channel icons identify their respective upstream providers. All trademarks belong to their owners; this project is not affiliated with or endorsed by them.
+
+## Project support
+
+<table>
+<tbody>
+<tr>
+<td align="center" width="33%">
+<a href="https://openai.com/">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="./screenshot/sponsor-openai-lockup-white.svg">
+<source media="(prefers-color-scheme: light)" srcset="./screenshot/sponsor-openai-lockup-black.svg">
+<img src="./screenshot/sponsor-openai-lockup-black.svg" alt="OpenAI" width="120">
+</picture>
+</a>
+<br><sub>Platform support</sub>
+</td>
+<td align="center" width="33%">
+<a href="https://linux.do"><img src="./screenshot/l.png" alt="LINUX DO" width="120"></a>
+<br><sub>Community support</sub>
+</td>
+<td align="center" width="33%">
+<a href="https://www.digitalocean.com/?refcode=3d52cff21342&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"><img src="https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%202.svg" alt="DigitalOcean" width="120"></a>
+<br><sub>Infrastructure support</sub>
+</td>
+</tr>
+</tbody>
+</table>
+
+---
+
+[MIT License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Security policy](SECURITY.md)

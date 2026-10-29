@@ -1,0 +1,931 @@
+package control
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+
+	"gpt-load/internal/accessquota"
+	app_errors "gpt-load/internal/platform/errors"
+	"gpt-load/internal/platform/utils"
+	"gpt-load/internal/protocol"
+	"gpt-load/internal/state"
+	"gpt-load/internal/storage/models"
+)
+
+type AccessKeyFilters struct {
+	Groups       []uint              `json:"groups"`
+	Protocols    []protocol.Protocol `json:"protocols"`
+	Models       []string            `json:"models"`
+	AllowedCIDRs []string            `json:"allowed_cidrs"`
+}
+
+type storedAccessKeyFilters struct {
+	Groups       []uint              `json:"groups"`
+	Protocols    []protocol.Protocol `json:"protocols"`
+	Models       []string            `json:"models"`
+	AllowedCIDRs []string            `json:"allowed_cidrs,omitempty"`
+}
+
+type OptionalRPMLimit struct {
+	Set   bool
+	Value int64
+}
+
+type OptionalNullableEpochMS struct {
+	Set   bool
+	Value *int64
+}
+
+func (value *OptionalNullableEpochMS) UnmarshalJSON(data []byte) error {
+	if value == nil {
+		return app_errors.ErrValidation
+	}
+	value.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		value.Value = nil
+		return nil
+	}
+	var decoded int64
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	value.Value = &decoded
+	return nil
+}
+
+type AccessKeyCostLimitRuleRequest struct {
+	ID            uint             `json:"id,omitempty"`
+	Kind          accessquota.Kind `json:"kind"`
+	LimitUSD      string           `json:"limit_usd"`
+	PeriodSeconds int64            `json:"period_seconds,omitempty"`
+}
+
+type OptionalAccessKeyCostLimitRules struct {
+	Set    bool
+	Values []AccessKeyCostLimitRuleRequest
+}
+
+func (value *OptionalAccessKeyCostLimitRules) UnmarshalJSON(data []byte) error {
+	if value == nil || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return app_errors.ErrValidation
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded []AccessKeyCostLimitRuleRequest
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("cost limit rules contain multiple JSON values")
+		}
+		return err
+	}
+	value.Set = true
+	value.Values = decoded
+	return nil
+}
+
+type AccessKeyCostLimitRule struct {
+	ID            uint             `json:"id"`
+	Kind          accessquota.Kind `json:"kind"`
+	LimitUSD      string           `json:"limit_usd"`
+	PeriodSeconds int64            `json:"period_seconds,omitempty"`
+}
+
+type AccessKeyCostLimitRuleStatus struct {
+	ID                uint                   `json:"id"`
+	Kind              accessquota.Kind       `json:"kind"`
+	LimitUSD          string                 `json:"limit_usd"`
+	UsedUSD           string                 `json:"used_usd"`
+	RemainingUSD      string                 `json:"remaining_usd"`
+	Status            accessquota.RuleStatus `json:"status"`
+	PeriodSeconds     int64                  `json:"period_seconds,omitempty"`
+	WindowStartedAtMS *int64                 `json:"window_started_at_ms,omitempty"`
+	WindowEndsAtMS    *int64                 `json:"window_ends_at_ms,omitempty"`
+}
+
+type AccessKeyCostLimitStatus struct {
+	ObservedAtMS      int64                          `json:"observed_at_ms"`
+	Allowed           bool                           `json:"allowed"`
+	Recoverable       bool                           `json:"recoverable"`
+	NextAvailableAtMS *int64                         `json:"next_available_at_ms"`
+	Rules             []AccessKeyCostLimitRuleStatus `json:"rules"`
+}
+
+func (value *OptionalRPMLimit) UnmarshalJSON(data []byte) error {
+	if value == nil || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return app_errors.ErrValidation
+	}
+	var decoded int64
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	value.Set = true
+	value.Value = decoded
+	return nil
+}
+
+type AccessKeyCreateRequest struct {
+	ConcurrencyLimit optionalField[int64]            `json:"concurrency_limit,omitzero"`
+	Key              string                          `json:"key"`
+	PriceMultiplier  optionalField[string]           `json:"price_multiplier"`
+	Name             string                          `json:"name"`
+	Status           *state.AccessKeyStatus          `json:"status"`
+	Filters          *AccessKeyFilters               `json:"filters"`
+	RPMLimit         OptionalRPMLimit                `json:"rpm_limit"`
+	CostLimitRules   OptionalAccessKeyCostLimitRules `json:"cost_limit_rules"`
+	ExpiresAtMS      *int64                          `json:"expires_at_ms"`
+	// RecordRequestBody 开启后记录该密钥请求的客户端原始请求体，默认关闭。
+	RecordRequestBody bool `json:"record_request_body"`
+}
+
+type AccessKeyUpdateRequest struct {
+	ConcurrencyLimit optionalField[int64]            `json:"concurrency_limit,omitzero"`
+	Key              string                          `json:"key"`
+	PriceMultiplier  optionalField[string]           `json:"price_multiplier"`
+	Name             *string                         `json:"name"`
+	Status           *state.AccessKeyStatus          `json:"status"`
+	Filters          *AccessKeyFilters               `json:"filters"`
+	RPMLimit         OptionalRPMLimit                `json:"rpm_limit"`
+	CostLimitRules   OptionalAccessKeyCostLimitRules `json:"cost_limit_rules"`
+	ExpiresAtMS      OptionalNullableEpochMS         `json:"expires_at_ms"`
+	// RecordRequestBody 为 nil 时不修改记录开关。
+	RecordRequestBody *bool `json:"record_request_body,omitempty"`
+}
+
+type AccessKeyCostLimitResetRequest struct {
+	RuleIDs []uint `json:"rule_ids"`
+}
+
+type AccessKeyMetadata struct {
+	ConcurrencyLimit  *int64                    `json:"concurrency_limit"`
+	Concurrency       ConcurrencyView           `json:"concurrency"`
+	PriceMultiplier   string                    `json:"price_multiplier"`
+	ID                uint                      `json:"id"`
+	Name              string                    `json:"name"`
+	MaskedKey         string                    `json:"masked_key"`
+	Status            state.AccessKeyStatus     `json:"status"`
+	Filters           AccessKeyFilters          `json:"filters"`
+	RPMLimit          int64                     `json:"rpm_limit"`
+	CostLimitRules    []AccessKeyCostLimitRule  `json:"cost_limit_rules"`
+	CostLimitStatus   *AccessKeyCostLimitStatus `json:"cost_limit_status,omitempty"`
+	ExpiresAtMS       *int64                    `json:"expires_at_ms"`
+	CreatedAtMS       int64                     `json:"created_at_ms"`
+	UpdatedAtMS       int64                     `json:"updated_at_ms"`
+	RecordRequestBody bool                      `json:"record_request_body"`
+}
+
+type AccessKeyCreateResult struct {
+	AccessKeyMetadata
+	Key      string `json:"key,omitempty"`
+	Replayed bool   `json:"replayed"`
+}
+
+type AccessKeyOption struct {
+	KeySuffix string                `json:"key_suffix"`
+	ID        uint                  `json:"id"`
+	Name      string                `json:"name"`
+	Status    state.AccessKeyStatus `json:"status"`
+}
+
+type AccessKeyRevealResult struct {
+	ID           uint   `json:"id"`
+	Key          string `json:"key"`
+	RevealedAtMS int64  `json:"revealed_at_ms"`
+}
+
+type accessKeyMetadataRow struct {
+	ConcurrencyLimit      *int64
+	KeyPrefix             string
+	PriceMultiplierMicros *int64
+	ID                    uint
+	Name                  string
+	KeySuffix             string
+	Status                string
+	Filters               models.JSON
+	RPMLimit              int64
+	ExpiresAtMS           *int64
+	CreatedAtMS           int64
+	UpdatedAtMS           int64
+	RecordRequestBody     bool
+}
+
+type generatedAccessKeyCredential struct {
+	KeyPrefix string
+	Plaintext string
+	KeyValue  string
+	KeyHash   string
+	KeySuffix string
+}
+
+const accessKeyPrefix = "sk-gl-"
+
+func (s *Service) newAccessKeyRow(
+	name string,
+	filters AccessKeyFilters,
+	rpmLimit int64,
+	customKey string,
+) (models.AccessKey, string, error) {
+	encodedFilters, err := encodeStoredAccessKeyFilters(filters)
+	if err != nil {
+		return models.AccessKey{}, "", fmt.Errorf("encode access key filters: %w", err)
+	}
+	credential, err := s.prepareAccessKeyCredential(customKey)
+	if err != nil {
+		return models.AccessKey{}, "", err
+	}
+	return models.AccessKey{
+		Name:      name,
+		KeyValue:  credential.KeyValue,
+		KeyHash:   credential.KeyHash,
+		KeyPrefix: &credential.KeyPrefix,
+		KeySuffix: credential.KeySuffix,
+		Status:    string(state.AccessKeyStatusActive),
+		Filters:   models.JSON(encodedFilters),
+		RPMLimit:  rpmLimit,
+	}, credential.Plaintext, nil
+}
+
+func (s *Service) generateAccessKeyCredential() (generatedAccessKeyCredential, error) {
+	return s.prepareAccessKeyCredential("")
+}
+
+func (s *Service) prepareAccessKeyCredential(plaintext string) (generatedAccessKeyCredential, error) {
+	if plaintext == "" {
+		randomBytes := make([]byte, 16)
+		if _, err := io.ReadFull(s.random, randomBytes); err != nil {
+			return generatedAccessKeyCredential{}, fmt.Errorf("generate access key: %w", err)
+		}
+		plaintext = accessKeyPrefix + hex.EncodeToString(randomBytes)
+	}
+	if !validAccessKeyPlaintext(plaintext) {
+		return generatedAccessKeyCredential{}, app_errors.ErrInvalidCustomAccessKey
+	}
+	ciphertext, err := s.encryption.Encrypt(plaintext)
+	if err != nil {
+		return generatedAccessKeyCredential{}, fmt.Errorf("encrypt access key: %w", err)
+	}
+	// 短密钥全部隐藏，避免尾号披露全部或大部分凭据。
+	suffix := "****"
+	prefix := ""
+	if len(plaintext) > 8 {
+		suffix = plaintext[len(plaintext)-4:]
+	}
+	if len(plaintext) > 16 {
+		prefix = plaintext[:6]
+	}
+	return generatedAccessKeyCredential{
+		Plaintext: plaintext,
+		KeyValue:  ciphertext,
+		KeyHash:   s.encryption.Hash(plaintext),
+		KeyPrefix: prefix,
+		KeySuffix: suffix,
+	}, nil
+}
+
+func (s *Service) CreateAccessKey(
+	ctx context.Context,
+	request AccessKeyCreateRequest,
+) (AccessKeyCreateResult, error) {
+	name, err := normalizeAccessKeyName(request.Name)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	filters, err := normalizeAccessKeyFilters(request.Filters)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	rpmLimit, err := normalizeRPMLimit(request.RPMLimit, 0)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	concurrencyLimit, err := normalizeConcurrencyLimit(request.ConcurrencyLimit)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	costLimitRules, err := normalizeAccessKeyCostLimitRules(request.CostLimitRules, false)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	status := state.AccessKeyStatusActive
+	if request.Status != nil {
+		status = *request.Status
+	}
+	if status != state.AccessKeyStatusActive && status != state.AccessKeyStatusDisabled {
+		return AccessKeyCreateResult{}, app_errors.ErrValidation
+	}
+	if err := validateOptionalExpiresAtMS(request.ExpiresAtMS); err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+
+	priceMultiplier, err := normalizePriceMultiplier(request.PriceMultiplier)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	var result AccessKeyCreateResult
+	_, err = s.writeConfig(ctx, func(tx *gorm.DB) error {
+		if err := validateFutureExpiresAtMS(request.ExpiresAtMS, s.now()); err != nil {
+			return err
+		}
+		if err := validateFilterGroupReferences(tx, filters.Groups); err != nil {
+			return err
+		}
+		row, plaintext, err := s.newAccessKeyRow(name, filters, rpmLimit, request.Key)
+		if err != nil {
+			return err
+		}
+		row.PriceMultiplierMicros = priceMultiplierStorage(priceMultiplier)
+		row.ConcurrencyLimit = concurrencyLimit
+		row.Status = string(status)
+		row.ExpiresAtMS = cloneOptionalInt64(request.ExpiresAtMS)
+		row.RecordRequestBody = request.RecordRequestBody
+		if err := tx.Create(&row).Error; err != nil {
+			return app_errors.ParseDBError(err)
+		}
+		persistedCostLimitRules, err := createAccessKeyCostLimitRules(tx, row.ID, costLimitRules)
+		if err != nil {
+			return err
+		}
+		metadata, err := mapAccessKeyMetadataRow(accessKeyMetadataRow{
+			ID: row.ID, Name: row.Name, KeyPrefix: *row.KeyPrefix, KeySuffix: row.KeySuffix,
+			PriceMultiplierMicros: row.PriceMultiplierMicros,
+			Status:                row.Status, Filters: row.Filters, RPMLimit: row.RPMLimit, ConcurrencyLimit: row.ConcurrencyLimit,
+			ExpiresAtMS: row.ExpiresAtMS,
+			CreatedAtMS: row.CreatedAtMS, UpdatedAtMS: row.UpdatedAtMS,
+			RecordRequestBody: row.RecordRequestBody,
+		})
+		if err != nil {
+			return err
+		}
+		metadata.CostLimitRules = mapAccessKeyCostLimitRules(persistedCostLimitRules)
+		result = AccessKeyCreateResult{
+			AccessKeyMetadata: metadata,
+			Key:               plaintext,
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		return AccessKeyCreateResult{}, err
+	}
+	s.fillAccessKeyConcurrency(&result.AccessKeyMetadata)
+	return result, nil
+}
+
+func (s *Service) UpdateAccessKey(
+	ctx context.Context,
+	id uint,
+	request AccessKeyUpdateRequest,
+) (AccessKeyMetadata, error) {
+	mutate, err := s.accessKeyUpdateMutation(id, request)
+	if err != nil {
+		return AccessKeyMetadata{}, err
+	}
+	var result AccessKeyMetadata
+	_, err = s.writeConfig(ctx, func(tx *gorm.DB) error {
+		var mutationErr error
+		result, mutationErr = mutate(tx)
+		return mutationErr
+	}, nil)
+	if err != nil {
+		return AccessKeyMetadata{}, err
+	}
+	s.fillAccessKeyConcurrency(&result)
+	return result, nil
+}
+
+func (s *Service) accessKeyUpdateMutation(
+	id uint,
+	request AccessKeyUpdateRequest,
+) (func(*gorm.DB) (AccessKeyMetadata, error), error) {
+	if id == 0 || (request.Key == "" && request.Name == nil && request.Status == nil && request.Filters == nil &&
+		!request.ConcurrencyLimit.Set && !request.RPMLimit.Set && !request.CostLimitRules.Set && !request.ExpiresAtMS.Set && !request.PriceMultiplier.Set &&
+		request.RecordRequestBody == nil) {
+		return nil, app_errors.ErrBadRequest
+	}
+	if _, err := normalizeRPMLimit(request.RPMLimit, 0); err != nil {
+		return nil, err
+	}
+	concurrencyLimit, err := normalizeConcurrencyLimit(request.ConcurrencyLimit)
+	if err != nil {
+		return nil, err
+	}
+	if request.ExpiresAtMS.Set {
+		if err := validateOptionalExpiresAtMS(request.ExpiresAtMS.Value); err != nil {
+			return nil, err
+		}
+	}
+	priceMultiplier, err := normalizePriceMultiplier(request.PriceMultiplier)
+	if err != nil {
+		return nil, err
+	}
+	var desiredCostLimitRules []normalizedAccessKeyCostLimitRule
+	if request.CostLimitRules.Set {
+		var err error
+		desiredCostLimitRules, err = normalizeAccessKeyCostLimitRules(request.CostLimitRules, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var name *string
+	if request.Name != nil {
+		normalized, err := normalizeAccessKeyName(*request.Name)
+		if err != nil {
+			return nil, err
+		}
+		name = &normalized
+	}
+	if request.Status != nil &&
+		*request.Status != state.AccessKeyStatusActive &&
+		*request.Status != state.AccessKeyStatusDisabled {
+		return nil, app_errors.ErrValidation
+	}
+	var filters *AccessKeyFilters
+	var encodedFilters []byte
+	if request.Filters != nil {
+		normalized, err := normalizeAccessKeyFilters(request.Filters)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := encodeStoredAccessKeyFilters(normalized)
+		if err != nil {
+			return nil, fmt.Errorf("encode access key filters: %w", err)
+		}
+		filters = &normalized
+		encodedFilters = encoded
+	}
+
+	if request.Key != "" && !validAccessKeyPlaintext(request.Key) {
+		return nil, app_errors.ErrInvalidCustomAccessKey
+	}
+	return func(tx *gorm.DB) (AccessKeyMetadata, error) {
+		var result AccessKeyMetadata
+		var err error
+		if request.ExpiresAtMS.Set {
+			if err := validateFutureExpiresAtMS(request.ExpiresAtMS.Value, s.now()); err != nil {
+				return result, err
+			}
+		}
+		var row accessKeyMetadataRow
+		if err := tx.Model(&models.AccessKey{}).
+			Select(
+				"id", "name", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "concurrency_limit", "expires_at_ms", "price_multiplier_micros",
+				"created_at_ms", "updated_at_ms", "record_request_body",
+			).
+			Where("id = ?", id).
+			Take(&row).Error; err != nil {
+			return result, app_errors.ParseDBError(err)
+		}
+		if !validAccessKeyPrefix(row.KeyPrefix) || !validAccessKeySuffix(row.KeySuffix) {
+			return result, fmt.Errorf(
+				"access key %d has invalid persisted suffix: %w",
+				row.ID,
+				app_errors.ErrInternalServer,
+			)
+		}
+		currentFilters, err := decodeStoredAccessKeyFilters(row.Filters)
+		if err != nil {
+			return result, fmt.Errorf("decode access key %d filters: %w", row.ID, err)
+		}
+		if filters != nil {
+			if err := validateAccessKeyGroupUpdate(
+				tx,
+				currentFilters.Groups,
+				filters.Groups,
+			); err != nil {
+				return result, err
+			}
+		}
+		status := state.AccessKeyStatus(row.Status)
+		if status != state.AccessKeyStatusActive && status != state.AccessKeyStatusDisabled {
+			return result, fmt.Errorf("access key %d has invalid status", row.ID)
+		}
+
+		updates := make(map[string]any, 5)
+		if request.Key != "" {
+			credential, err := s.prepareAccessKeyCredential(request.Key)
+			if err != nil {
+				return result, err
+			}
+			updates["key_value"] = credential.KeyValue
+			updates["key_hash"] = credential.KeyHash
+			updates["key_prefix"] = credential.KeyPrefix
+			updates["key_suffix"] = credential.KeySuffix
+		}
+		if request.PriceMultiplier.Set {
+			row.PriceMultiplierMicros = priceMultiplierStorage(priceMultiplier)
+			updates["price_multiplier_micros"] = int64(priceMultiplier)
+		}
+		if name != nil {
+			row.Name = *name
+			updates["name"] = row.Name
+		}
+		if request.Status != nil {
+			status = *request.Status
+			updates["status"] = string(status)
+		}
+		if filters != nil {
+			currentFilters = *filters
+			updates["filters"] = models.JSON(encodedFilters)
+		}
+		if request.ConcurrencyLimit.Set {
+			row.ConcurrencyLimit = concurrencyLimit
+			updates["concurrency_limit"] = concurrencyLimit
+		}
+		if request.RPMLimit.Set {
+			row.RPMLimit = request.RPMLimit.Value
+			updates["rpm_limit"] = row.RPMLimit
+		}
+		if request.ExpiresAtMS.Set {
+			row.ExpiresAtMS = cloneOptionalInt64(request.ExpiresAtMS.Value)
+			updates["expires_at_ms"] = row.ExpiresAtMS
+		}
+		if request.RecordRequestBody != nil {
+			row.RecordRequestBody = *request.RecordRequestBody
+			updates["record_request_body"] = row.RecordRequestBody
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&models.AccessKey{}).
+				Where("id = ?", row.ID).
+				Updates(updates).Error; err != nil {
+				return result, app_errors.ParseDBError(err)
+			}
+		}
+		var costLimitRows []models.AccessKeyCostLimitRule
+		if request.CostLimitRules.Set {
+			costLimitRows, err = reconcileAccessKeyCostLimitRules(tx, row.ID, desiredCostLimitRules)
+		} else {
+			costLimitRows, err = loadAccessKeyCostLimitRuleRows(tx, row.ID)
+		}
+		if err != nil {
+			return result, err
+		}
+		if err := tx.Model(&models.AccessKey{}).
+			Select(
+				"id", "name", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "concurrency_limit", "expires_at_ms", "price_multiplier_micros",
+				"created_at_ms", "updated_at_ms", "record_request_body",
+			).
+			Where("id = ?", row.ID).
+			Take(&row).Error; err != nil {
+			return result, app_errors.ParseDBError(err)
+		}
+		result, err = mapAccessKeyMetadataRow(row)
+		if err == nil {
+			result.CostLimitRules = mapAccessKeyCostLimitRules(costLimitRows)
+		}
+		return result, err
+	}, nil
+}
+
+func (s *Service) ListAccessKeyOptions(ctx context.Context) ([]AccessKeyOption, error) {
+	var rows []AccessKeyOption
+	if err := s.db.WithContext(ctx).
+		Model(&models.AccessKey{}).
+		Select("id", "name", "status", "key_suffix").
+		Order("id ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, app_errors.ParseDBError(err)
+	}
+	for _, row := range rows {
+		if row.Status != state.AccessKeyStatusActive &&
+			row.Status != state.AccessKeyStatusDisabled {
+			return nil, fmt.Errorf(
+				"access key %d has invalid status: %w",
+				row.ID,
+				app_errors.ErrInternalServer,
+			)
+		}
+	}
+	return rows, nil
+}
+
+func (s *Service) RevealAccessKey(
+	ctx context.Context,
+	id uint,
+) (AccessKeyRevealResult, error) {
+	if id == 0 {
+		return AccessKeyRevealResult{}, app_errors.ErrBadRequest
+	}
+	var row struct {
+		ID       uint
+		KeyValue string
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&models.AccessKey{}).
+		Select("id", "key_value").
+		Where("id = ?", id).
+		Take(&row).Error; err != nil {
+		return AccessKeyRevealResult{}, app_errors.ParseDBError(err)
+	}
+	plaintext, err := s.encryption.Decrypt(row.KeyValue)
+	if err != nil || !validAccessKeyPlaintext(plaintext) {
+		return AccessKeyRevealResult{}, fmt.Errorf(
+			"reveal access key %d: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	revealedAtMS, err := safeEpochMilliseconds(s.now())
+	if err != nil {
+		return AccessKeyRevealResult{}, app_errors.ErrInternalServer
+	}
+	return AccessKeyRevealResult{
+		ID:           row.ID,
+		Key:          plaintext,
+		RevealedAtMS: revealedAtMS,
+	}, nil
+}
+
+func mapAccessKeyMetadataRow(row accessKeyMetadataRow) (AccessKeyMetadata, error) {
+	if err := validateSafeMilliseconds(row.CreatedAtMS); err != nil {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"access key %d has invalid created_at_ms: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	if err := validateSafeMilliseconds(row.UpdatedAtMS); err != nil {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"access key %d has invalid updated_at_ms: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	if err := validateOptionalExpiresAtMS(row.ExpiresAtMS); err != nil {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"access key %d has invalid expires_at_ms: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	status := state.AccessKeyStatus(row.Status)
+	if status != state.AccessKeyStatusActive && status != state.AccessKeyStatusDisabled {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"access key %d has invalid status: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	if !validAccessKeyPrefix(row.KeyPrefix) || !validAccessKeySuffix(row.KeySuffix) {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"access key %d has invalid persisted suffix: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	filters, err := decodeStoredAccessKeyFilters(row.Filters)
+	if err != nil {
+		return AccessKeyMetadata{}, fmt.Errorf(
+			"decode access key %d filters: %w",
+			row.ID,
+			app_errors.ErrInternalServer,
+		)
+	}
+	return AccessKeyMetadata{
+		ConcurrencyLimit: cloneOptionalInt64(row.ConcurrencyLimit),
+		PriceMultiplier:  priceMultiplierResponse(row.PriceMultiplierMicros),
+		ID:               row.ID, Name: row.Name,
+		MaskedKey: maskedAccessKey(row.KeyPrefix, row.KeySuffix),
+		Status:    status, Filters: filters, RPMLimit: row.RPMLimit,
+		ExpiresAtMS:    cloneOptionalInt64(row.ExpiresAtMS),
+		CostLimitRules: []AccessKeyCostLimitRule{},
+		CreatedAtMS:    row.CreatedAtMS, UpdatedAtMS: row.UpdatedAtMS,
+		RecordRequestBody: row.RecordRequestBody,
+	}, nil
+}
+
+func maskedAccessKey(prefix, suffix string) string {
+	return prefix + "****" + suffix
+}
+
+func validAccessKeyPrefix(value string) bool {
+	return value == "" || len(value) == 6 && validAccessKeyPlaintext(value)
+}
+
+func validAccessKeySuffix(value string) bool {
+	if len(value) != 4 {
+		return false
+	}
+	return validAccessKeyPlaintext(value)
+}
+
+func validAccessKeyPlaintext(value string) bool {
+	if len(value) == 0 || len(value) > 256 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character < '!' || character > '~' {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) DeleteAccessKey(ctx context.Context, id uint) error {
+	if id == 0 {
+		return app_errors.ErrBadRequest
+	}
+	_, err := s.writeConfig(ctx, func(tx *gorm.DB) error {
+		var row models.AccessKey
+		if err := tx.Select("id").First(&row, id).Error; err != nil {
+			return app_errors.ParseDBError(err)
+		}
+		if err := tx.Delete(&row).Error; err != nil {
+			return app_errors.ParseDBError(err)
+		}
+		return nil
+	}, nil)
+	return err
+}
+
+func normalizeAccessKeyName(raw string) (string, error) {
+	normalized, err := normalizeGroupName(&raw)
+	if err != nil {
+		return "", err
+	}
+	return *normalized, nil
+}
+
+func normalizeRPMLimit(value OptionalRPMLimit, defaultValue int64) (int64, error) {
+	if !value.Set {
+		return defaultValue, nil
+	}
+	if value.Value < 0 {
+		return 0, app_errors.ErrValidation
+	}
+	return value.Value, nil
+}
+
+func normalizeAccessKeyFilters(input *AccessKeyFilters) (AccessKeyFilters, error) {
+	result := AccessKeyFilters{
+		Groups: make([]uint, 0), Protocols: make([]protocol.Protocol, 0),
+		Models: make([]string, 0), AllowedCIDRs: make([]string, 0),
+	}
+	if input == nil {
+		return result, nil
+	}
+
+	seenGroups := make(map[uint]struct{}, len(input.Groups))
+	for _, groupID := range input.Groups {
+		if groupID == 0 {
+			return AccessKeyFilters{}, app_errors.ErrValidation
+		}
+		if _, duplicate := seenGroups[groupID]; duplicate {
+			continue
+		}
+		seenGroups[groupID] = struct{}{}
+		result.Groups = append(result.Groups, groupID)
+	}
+	seenProtocols := make(map[protocol.Protocol]struct{}, len(input.Protocols))
+	for _, value := range input.Protocols {
+		if !value.DataPlaneEnabled() {
+			return AccessKeyFilters{}, app_errors.ErrValidation
+		}
+		seenProtocols[value] = struct{}{}
+	}
+	for _, value := range protocol.DataPlaneProtocols() {
+		if _, exists := seenProtocols[value]; exists {
+			result.Protocols = append(result.Protocols, value)
+		}
+	}
+	seenModels := make(map[string]struct{}, len(input.Models))
+	for _, value := range input.Models {
+		normalized := strings.TrimSpace(value)
+		if normalized == "" {
+			return AccessKeyFilters{}, app_errors.ErrValidation
+		}
+		if _, duplicate := seenModels[normalized]; duplicate {
+			continue
+		}
+		seenModels[normalized] = struct{}{}
+		result.Models = append(result.Models, normalized)
+	}
+	allowedCIDRs, _, err := utils.NormalizeAllowedCIDRs(input.AllowedCIDRs)
+	if err != nil {
+		return AccessKeyFilters{}, app_errors.ErrValidation
+	}
+	result.AllowedCIDRs = allowedCIDRs
+	return result, nil
+}
+
+func encodeStoredAccessKeyFilters(filters AccessKeyFilters) ([]byte, error) {
+	return json.Marshal(storedAccessKeyFilters{
+		Groups:       filters.Groups,
+		Protocols:    filters.Protocols,
+		Models:       filters.Models,
+		AllowedCIDRs: filters.AllowedCIDRs,
+	})
+}
+
+func validateOptionalExpiresAtMS(value *int64) error {
+	if value == nil {
+		return nil
+	}
+	if err := validateSafeMilliseconds(*value); err != nil {
+		return app_errors.ErrValidation
+	}
+	return nil
+}
+
+func validateFutureExpiresAtMS(value *int64, operationStartedAt time.Time) error {
+	if value == nil {
+		return nil
+	}
+	operationStartedAtMS, err := safeEpochMilliseconds(operationStartedAt)
+	if err != nil {
+		return app_errors.ErrInternalServer
+	}
+	if *value <= operationStartedAtMS {
+		return app_errors.ErrValidation
+	}
+	return nil
+}
+
+func cloneOptionalInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func validateFilterGroupReferences(tx *gorm.DB, groupIDs []uint) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	var count int64
+	if err := tx.Model(&models.Group{}).Where("id IN ?", groupIDs).Count(&count).Error; err != nil {
+		return app_errors.ParseDBError(err)
+	}
+	if count != int64(len(groupIDs)) {
+		return app_errors.ErrValidation
+	}
+	return nil
+}
+
+func validateAccessKeyGroupUpdate(
+	tx *gorm.DB,
+	current []uint,
+	requested []uint,
+) error {
+	if len(requested) == 0 {
+		return nil
+	}
+	currentSet := make(map[uint]struct{}, len(current))
+	for _, groupID := range current {
+		currentSet[groupID] = struct{}{}
+	}
+	var existing []uint
+	if err := tx.Model(&models.Group{}).
+		Where("id IN ?", requested).
+		Pluck("id", &existing).Error; err != nil {
+		return app_errors.ParseDBError(err)
+	}
+	existingSet := make(map[uint]struct{}, len(existing))
+	for _, groupID := range existing {
+		existingSet[groupID] = struct{}{}
+	}
+	for _, groupID := range requested {
+		if _, exists := existingSet[groupID]; exists {
+			continue
+		}
+		if _, historical := currentSet[groupID]; !historical {
+			return app_errors.ErrValidation
+		}
+	}
+	return nil
+}
+
+func decodeStoredAccessKeyFilters(raw models.JSON) (AccessKeyFilters, error) {
+	if len(raw) == 0 {
+		return normalizeAccessKeyFilters(nil)
+	}
+	var decoded storedAccessKeyFilters
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return AccessKeyFilters{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return AccessKeyFilters{}, fmt.Errorf("multiple JSON values")
+		}
+		return AccessKeyFilters{}, err
+	}
+	return normalizeAccessKeyFilters(&AccessKeyFilters{
+		Groups: decoded.Groups, Protocols: decoded.Protocols, Models: decoded.Models,
+		AllowedCIDRs: decoded.AllowedCIDRs,
+	})
+}

@@ -1,70 +1,132 @@
-// Package main provides the entry point for the GPT-Load proxy server
+// Package main provides the GPT-Load 2.0 process entry point.
 package main
 
 import (
-	"context"
-	"embed"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
-	"time"
-
-	"gpt-load/internal/app"
-	"gpt-load/internal/container"
-	"gpt-load/internal/types"
-	"gpt-load/internal/utils"
 
 	"github.com/sirupsen/logrus"
+
+	"gpt-load/internal/platform/version"
 )
 
-//go:embed web/dist
-var buildFS embed.FS
-
-//go:embed web/dist/index.html
-var indexPage []byte
-
 func main() {
-	// Build the dependency injection container
-	container, err := container.BuildContainer()
+	cleanupReplacedExecutable()
+	if len(os.Args) > 1 {
+		os.Exit(dispatchCommand(os.Args[1:], os.Stdout, os.Stderr))
+	}
+	if err := runServer(); err != nil {
+		logrus.WithError(err).Error("GPT-Load stopped with an error")
+		os.Exit(1)
+	}
+}
+
+func dispatchCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printHelp(stdout)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printHelp(stdout)
+		return 0
+	case "version", "--version":
+		return runVersionCommand(args[1:], stdout, stderr)
+	case "update":
+		return runUpdateCommand(args[1:], stdout, stderr)
+	case "migrate-keys":
+		fmt.Fprintln(stderr, "migrate-keys will be available in a later release")
+		return 1
+	case "service":
+		return dispatchServiceCommand(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "Unknown command: %s\n", args[0])
+		fmt.Fprintln(stderr, "Run 'gpt-load help' for usage.")
+		return 1
+	}
+}
+
+func printHelp(output io.Writer) {
+	fmt.Fprintln(output, "GPT-Load - self-hosted AI API key gateway")
+	fmt.Fprintln(output)
+	fmt.Fprintln(output, "Usage:")
+	fmt.Fprintln(output, "  gpt-load                    Start the gateway")
+	fmt.Fprintln(output, "  gpt-load version            Display the version")
+	fmt.Fprintln(output, "  gpt-load update             Update to the latest release")
+	fmt.Fprintln(output, "  gpt-load help               Display this help message")
+	fmt.Fprintln(output)
+	fmt.Fprintln(output, "Windows Service Commands:")
+	fmt.Fprintln(output, "  gpt-load service start      Start the Windows service")
+	fmt.Fprintln(output, "  gpt-load service stop       Stop the Windows service")
+	fmt.Fprintln(output, "  gpt-load service restart    Restart the Windows service")
+	fmt.Fprintln(output, "  gpt-load service status     Display the Windows service status")
+	fmt.Fprintln(output)
+	fmt.Fprintln(output, "Deferred Commands:")
+	fmt.Fprintln(output, "  migrate-keys      Key rotation support will be available in a later release")
+}
+
+func runVersionCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "version does not accept arguments")
+		return 1
+	}
+	fmt.Fprintf(stdout, "GPT-Load %s (%s/%s)\n", version.Version, runtime.GOOS, runtime.GOARCH)
+	return 0
+}
+
+func runServer() error {
+	runtime, err := buildManagedRuntime()
 	if err != nil {
-		logrus.Fatalf("Failed to build container: %v", err)
+		return err
+	}
+	quit := make(chan os.Signal, 2)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	if err := runtime.start(); err != nil {
+		return err
 	}
 
-	// Provide UI assets to the container
-	if err := container.Provide(func() embed.FS { return buildFS }); err != nil {
-		logrus.Fatalf("Failed to provide buildFS: %v", err)
-	}
-	if err := container.Provide(func() []byte { return indexPage }); err != nil {
-		logrus.Fatalf("Failed to provide indexPage: %v", err)
-	}
-
-	// Initialize global logger
-	if err := container.Invoke(func(configManager types.ConfigManager) {
-		utils.SetupLogger(configManager)
-	}); err != nil {
-		logrus.Fatalf("Failed to setup logger: %v", err)
+	var serveErr error
+	var firstSignal os.Signal
+	select {
+	case firstSignal = <-quit:
+		logrus.WithFields(logrus.Fields{
+			"event":  "shutdown.requested",
+			"signal": firstSignal.String(),
+		}).Info("shutdown requested by signal")
+	case serveErr = <-runtime.serveErrors():
 	}
 
-	// Create and run the application
-	if err := container.Invoke(func(application *app.App, configManager types.ConfigManager) {
-		if err := application.Start(); err != nil {
-			logrus.Fatalf("Failed to start application: %v", err)
+	force := make(chan struct{})
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- runtime.stop(force) }()
+	forceReason := "signal_during_shutdown"
+	if firstSignal != nil {
+		forceReason = "second_signal"
+	}
+	select {
+	case secondSignal := <-quit:
+		logrus.WithFields(logrus.Fields{
+			"event":  "shutdown.force",
+			"signal": secondSignal.String(),
+			"reason": forceReason,
+		}).Warn("additional shutdown signal received; forcing shutdown")
+		close(force)
+		if err := <-stopResult; err != nil {
+			return errors.Join(serveErr, fmt.Errorf("stop application: %w", err))
 		}
-
-		// Wait for interrupt signal for graceful shutdown
-		quit := make(chan os.Signal, 1)
-		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-		<-quit
-
-		// Create a context with timeout for shutdown
-		serverConfig := configManager.GetEffectiveServerConfig()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Duration(serverConfig.GracefulShutdownTimeout)*time.Second)
-		defer cancel()
-
-		// Perform graceful shutdown
-		application.Stop(shutdownCtx)
-
-	}); err != nil {
-		logrus.Fatalf("Failed to run application: %v", err)
+		return serveErr
+	case err := <-stopResult:
+		if err != nil {
+			return errors.Join(serveErr, fmt.Errorf("stop application: %w", err))
+		}
+		return serveErr
 	}
 }

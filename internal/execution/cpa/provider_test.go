@@ -1,0 +1,191 @@
+package cpa
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"testing"
+
+	"gpt-load/internal/channel"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/outboundproxy"
+	"gpt-load/internal/protocol"
+)
+
+func TestProxySettingsForAttemptMapsFinalModesForCPA(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		effective outboundproxy.Effective
+		want      cpaProxySettings
+	}{
+		{name: "unspecified retains CPA default", want: cpaProxySettings{}},
+		{name: "explicit direct", effective: outboundproxy.Effective{Config: outboundproxy.Config{Mode: outboundproxy.ModeDirect}, Source: outboundproxy.SourceCredential}, want: cpaProxySettings{URL: "direct"}},
+		{name: "environment", effective: outboundproxy.Effective{Config: outboundproxy.Config{Mode: outboundproxy.ModeEnvironment}, Source: outboundproxy.SourceEnvironment}, want: cpaProxySettings{FromEnvironment: true}},
+		{name: "http", effective: outboundproxy.Effective{Config: outboundproxy.Config{Mode: outboundproxy.ModeCustom, URL: "http://user:password@proxy.example.com:8080"}, Source: outboundproxy.SourceGroup}, want: cpaProxySettings{URL: "http://user:password@proxy.example.com:8080"}},
+		{name: "socks5", effective: outboundproxy.Effective{Config: outboundproxy.Config{Mode: outboundproxy.ModeCustom, URL: "socks5://proxy.example.com:1080"}, Source: outboundproxy.SourceGlobal}, want: cpaProxySettings{URL: "socks5://proxy.example.com:1080"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := proxySettingsForAttempt(test.effective)
+			if err != nil || got != test.want {
+				t.Fatalf("proxySettingsForAttempt() = %#v, %v, want %#v", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestProxySettingsForAttemptPreservesEnvironmentAsDistinctPolicy(t *testing.T) {
+	t.Parallel()
+
+	unspecified, err := proxySettingsForAttempt(outboundproxy.Effective{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment, err := proxySettingsForAttempt(outboundproxy.Effective{
+		Config: outboundproxy.Config{Mode: outboundproxy.ModeEnvironment},
+		Source: outboundproxy.SourceEnvironment,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment == unspecified {
+		t.Fatal("CPA environment policy is indistinguishable from an unspecified proxy")
+	}
+}
+
+type requestScopedTestError struct{}
+
+func (requestScopedTestError) Error() string         { return "request rejected" }
+func (requestScopedTestError) IsRequestScoped() bool { return true }
+
+type credentialScopedTestError bool
+
+func (credentialScopedTestError) Error() string                { return "credential-scoped test error" }
+func (err credentialScopedTestError) IsCredentialScoped() bool { return bool(err) }
+
+type recordingProviderBridge struct {
+	kind                   channel.ProviderKind
+	validatedRoute         channel.RouteDescriptor
+	classificationStatus   int
+	classificationEvidence *execution.ErrorEvidence
+}
+
+func (bridge *recordingProviderBridge) ProviderKind() channel.ProviderKind { return bridge.kind }
+func (*recordingProviderBridge) UpstreamProtocol() protocol.Protocol       { return protocol.Anthropic }
+func (bridge *recordingProviderBridge) ValidateRouteCapability(route channel.RouteDescriptor) error {
+	bridge.validatedRoute = route
+	return nil
+}
+func (*recordingProviderBridge) ParseCredential([]byte) (providerCredential, error) {
+	return nil, nil
+}
+func (*recordingProviderBridge) Execute(context.Context, string, providerCredential, providerRequest) (providerResponse, error) {
+	return providerResponse{}, nil
+}
+func (*recordingProviderBridge) ExecuteStream(context.Context, string, providerCredential, providerRequest) (*providerStreamResponse, error) {
+	return nil, nil
+}
+func (bridge *recordingProviderBridge) ClassifyError(context.Context, error, providerCredential) (int, *execution.ErrorEvidence) {
+	return bridge.classificationStatus, bridge.classificationEvidence
+}
+
+func TestAdapterDelegatesRouteValidationByProviderKind(t *testing.T) {
+	codexBridge := &recordingProviderBridge{kind: channel.ProviderCodex}
+	claudeBridge := &recordingProviderBridge{kind: channel.ProviderClaude}
+	adapter := &Adapter{providers: indexProviderBridges(codexBridge, claudeBridge)}
+	route := channel.RouteDescriptor{
+		ClientProtocol: protocol.Anthropic,
+		Operation:      execution.OperationChatCompletion,
+		RouteMode:      execution.RouteNative,
+	}
+	if err := adapter.ValidateRouteCapability(channel.ProviderClaude, route); err != nil {
+		t.Fatal(err)
+	}
+	if claudeBridge.validatedRoute.ClientProtocol != protocol.Anthropic {
+		t.Fatalf("Claude route = %#v", claudeBridge.validatedRoute)
+	}
+	if codexBridge.validatedRoute.ClientProtocol != "" {
+		t.Fatalf("Codex bridge received Claude route = %#v", codexBridge.validatedRoute)
+	}
+}
+
+func TestAdapterValidatesAllDeclaredGrokRoutes(t *testing.T) {
+	registry := channel.NewRegistry()
+	adapter := NewAdapter(nil, registry)
+	descriptor, ok := registry.Get(channel.Grok)
+	if !ok {
+		t.Fatal("Grok channel is missing")
+	}
+	for _, route := range descriptor.Routes {
+		if err := adapter.ValidateRouteCapability(channel.ProviderGrok, route); err != nil {
+			t.Fatalf("ValidateRouteCapability(%#v) error = %v", route, err)
+		}
+	}
+}
+
+func TestRequestScopedFailureSurvivesErrorWrapping(t *testing.T) {
+	if !requestScopedFailure(errors.New("unrelated: " + requestScopedTestError{}.Error())) {
+		// A string with the same text is deliberately not sufficient.
+	} else {
+		t.Fatal("plain error was classified as request-scoped")
+	}
+	if !requestScopedFailure(errors.Join(errors.New("outer"), requestScopedTestError{})) {
+		t.Fatal("wrapped request-scoped error was not detected")
+	}
+}
+
+func TestCredentialScopedFailureSurvivesErrorWrapping(t *testing.T) {
+	for _, test := range []struct {
+		value credentialScopedTestError
+		want  bool
+	}{
+		{value: true, want: true},
+		{value: false, want: false},
+	} {
+		got, known := credentialScopedFailure(errors.Join(errors.New("outer"), test.value))
+		if !known || got != test.want {
+			t.Fatalf("credentialScopedFailure() = %t, %t; want %t, true", got, known, test.want)
+		}
+	}
+	if got, known := credentialScopedFailure(errors.New("plain")); got || known {
+		t.Fatalf("unclassified failure = %t, %t", got, known)
+	}
+}
+
+var _ providerBridge = (*recordingProviderBridge)(nil)
+
+func TestProviderModelRejectionRefinesGenericRequestHint(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		hint      execution.FailureHint
+		typeValue string
+		code      string
+		want      execution.FailureHint
+	}{
+		{name: "generic provider rejection", err: errors.New("model unsupported"), hint: execution.FailureHintRequestRejected, code: "unsupported_model", want: execution.FailureHintModelUnavailable},
+		{name: "model without generic hint", code: "unsupported_model", want: execution.FailureHintModelUnavailable},
+		{name: "model alias without generic hint", code: "unsupported-model", want: execution.FailureHintModelUnavailable},
+		{name: "explicit parameter error precedes model code", typeValue: "invalid_parameter", code: "unsupported_model", want: execution.FailureHintRequestRejected},
+		{name: "explicit request scope preserved", err: requestScopedTestError{}, hint: execution.FailureHintRequestRejected, code: "unsupported_model", want: execution.FailureHintRequestRejected},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			evidence := &execution.ErrorEvidence{
+				Kind: execution.ErrorKindHTTP, StatusCode: http.StatusBadRequest,
+				Hint: test.hint, Type: test.typeValue, Code: test.code,
+			}
+			annotateProviderErrorEvidence(evidence, test.err)
+			if evidence.Hint != test.want {
+				t.Fatalf("hint = %s, want %s", evidence.Hint, test.want)
+			}
+			wantScope := execution.ErrorScopeModel
+			if test.want == execution.FailureHintRequestRejected {
+				wantScope = execution.ErrorScopeRequest
+			}
+			if evidence.ScopeHint != wantScope {
+				t.Fatalf("scope = %s, want %s", evidence.ScopeHint, wantScope)
+			}
+		})
+	}
+}

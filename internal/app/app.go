@@ -1,22 +1,22 @@
-// Package app provides the main application logic and lifecycle management.
+// Package app provides the 2.0 application lifecycle.
 package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
-	"gpt-load/internal/config"
-	db "gpt-load/internal/db/migrations"
-	"gpt-load/internal/keypool"
-	"gpt-load/internal/models"
-	"gpt-load/internal/proxy"
-	"gpt-load/internal/services"
-	"gpt-load/internal/store"
-	"gpt-load/internal/types"
-	"gpt-load/internal/version"
+	"gpt-load/internal/httplifecycle"
+	"gpt-load/internal/platform/config"
+	"gpt-load/internal/platform/i18n"
+	"gpt-load/internal/platform/utils"
+	"gpt-load/internal/platform/version"
+	"gpt-load/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -24,188 +24,403 @@ import (
 	"gorm.io/gorm"
 )
 
-// App holds all services and manages the application lifecycle.
+// App owns the process lifecycle, infrastructure resources, and runtime state.
 type App struct {
 	engine            *gin.Engine
-	configManager     types.ConfigManager
-	settingsManager   *config.SystemSettingsManager
-	groupManager      *services.GroupManager
-	logCleanupService *services.LogCleanupService
-	requestLogService *services.RequestLogService
-	cronChecker       *keypool.CronChecker
-	keyPoolProvider   *keypool.KeyProvider
-	proxyServer       *proxy.ProxyServer
-	storage           store.Store
+	config            *config.Config
 	db                *gorm.DB
-	httpServer        *http.Server
+	runtimeState      RuntimeStateLoader
+	runtimeCheckpoint RuntimeStateCheckpoint
+	lifecycle         *httplifecycle.Coordinator
+	controlRuntime    ControlRuntime
+	startupBootstrap  StartupBootstrap
+	startupRecovery   StartupRecovery
+	requestLogs       RequestLogRuntime
+	executionRuntime  ExecutionRuntime
+	liveSessions      LiveSessionRuntime
+	listen            func(network, address string) (net.Listener, error)
+
+	mu            sync.Mutex
+	httpServer    *http.Server
+	listener      net.Listener
+	serveErrors   chan error
+	runtimeCancel context.CancelFunc
+	runtimeDone   chan struct{}
 }
 
-// AppParams defines the dependencies for the App.
+// RuntimeStateLoader initializes the in-memory runtime state from persistence.
+type RuntimeStateLoader interface {
+	Load(context.Context) error
+}
+
+// StartupBootstrap ensures required persisted state exists before runtime loading.
+type StartupBootstrap interface {
+	EnsureInitialState(context.Context) error
+}
+
+// StartupRecovery restores durable post-commit control-plane side effects.
+type StartupRecovery interface {
+	DrainCommittedOperations(context.Context) error
+}
+
+// ControlRuntime runs background control-plane maintenance.
+type ControlRuntime interface {
+	Run(context.Context)
+}
+
+// RequestLogRuntime owns the asynchronous request log worker lifecycle.
+type RequestLogRuntime interface {
+	Start() error
+	Stop(context.Context) error
+}
+
+// ExecutionRuntime owns provider-execution resources and starts a non-blocking
+// shutdown so SDK workers cannot consume the process shutdown deadline.
+type ExecutionRuntime interface {
+	Start(context.Context) error
+	BeginShutdown() <-chan struct{}
+}
+
+// LiveSessionRuntime releases long-lived media and control connections before HTTP draining.
+type LiveSessionRuntime interface {
+	CloseCodexLive()
+}
+
+// AppParams defines dependencies injected into App.
 type AppParams struct {
 	dig.In
+
 	Engine            *gin.Engine
-	ConfigManager     types.ConfigManager
-	SettingsManager   *config.SystemSettingsManager
-	GroupManager      *services.GroupManager
-	LogCleanupService *services.LogCleanupService
-	RequestLogService *services.RequestLogService
-	CronChecker       *keypool.CronChecker
-	KeyPoolProvider   *keypool.KeyProvider
-	ProxyServer       *proxy.ProxyServer
-	Storage           store.Store
+	Config            *config.Config
 	DB                *gorm.DB
+	StartupBootstrap  StartupBootstrap
+	StartupRecovery   StartupRecovery `optional:"true"`
+	RuntimeState      RuntimeStateLoader
+	RuntimeCheckpoint RuntimeStateCheckpoint     `optional:"true"`
+	Lifecycle         *httplifecycle.Coordinator `optional:"true"`
+	ControlRuntime    ControlRuntime
+	RequestLogs       RequestLogRuntime
+	ExecutionRuntime  ExecutionRuntime   `optional:"true"`
+	LiveSessions      LiveSessionRuntime `optional:"true"`
 }
 
-// NewApp is the constructor for App, with dependencies injected by dig.
+// NewEngine creates the process HTTP engine and global middleware.
+func NewEngine() (*gin.Engine, error) {
+	return newEngine(nil, nil)
+}
+
+// NewEngineWithLifecycle adds process-wide handler tracking used by the
+// production shutdown coordinator.
+func NewEngineWithLifecycle(lifecycle *httplifecycle.Coordinator, cfg *config.Config) (*gin.Engine, error) {
+	return newEngine(lifecycle, cfg)
+}
+
+func newEngine(lifecycle *httplifecycle.Coordinator, cfg *config.Config) (*gin.Engine, error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	resolver, err := utils.NewClientIPResolver(cfg.ClientIPHeader, cfg.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.RedirectTrailingSlash = false
+	if err := engine.SetTrustedProxies(nil); err != nil {
+		return nil, fmt.Errorf("disable trusted proxies: %w", err)
+	}
+	engine.Use(recoveryMiddleware())
+	engine.Use(func(c *gin.Context) { c.Request = resolver.Apply(c.Request) })
+	if lifecycle != nil {
+		engine.Use(lifecycle.TrackAll())
+	}
+	return engine, nil
+}
+
+// NewApp creates the application lifecycle manager.
 func NewApp(params AppParams) *App {
 	return &App{
 		engine:            params.Engine,
-		configManager:     params.ConfigManager,
-		settingsManager:   params.SettingsManager,
-		groupManager:      params.GroupManager,
-		logCleanupService: params.LogCleanupService,
-		requestLogService: params.RequestLogService,
-		cronChecker:       params.CronChecker,
-		keyPoolProvider:   params.KeyPoolProvider,
-		proxyServer:       params.ProxyServer,
-		storage:           params.Storage,
+		config:            params.Config,
 		db:                params.DB,
+		runtimeState:      params.RuntimeState,
+		runtimeCheckpoint: params.RuntimeCheckpoint,
+		lifecycle:         params.Lifecycle,
+		controlRuntime:    params.ControlRuntime,
+		startupBootstrap:  params.StartupBootstrap,
+		startupRecovery:   params.StartupRecovery,
+		requestLogs:       params.RequestLogs,
+		executionRuntime:  params.ExecutionRuntime,
+		liveSessions:      params.LiveSessions,
+		listen:            net.Listen,
+		serveErrors:       make(chan error, 1),
 	}
 }
 
-// Start runs the application, it is a non-blocking call.
+// Start initializes platform services, migrates the schema, and starts HTTP.
 func (a *App) Start() error {
-	// Master 节点执行初始化
-	if a.configManager.IsMaster() {
-		logrus.Info("Starting as Master Node.")
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-		// 数据库迁移
-		if err := a.db.AutoMigrate(
-			&models.SystemSetting{},
-			&models.Group{},
-			&models.APIKey{},
-			&models.RequestLog{},
-			&models.GroupHourlyStat{},
-		); err != nil {
-			return fmt.Errorf("database auto-migration failed: %w", err)
+	if a.httpServer != nil {
+		return fmt.Errorf("application is already started")
+	}
+	logrus.WithField("event", "startup.begin").Info("application startup started")
+	if err := i18n.Init(); err != nil {
+		return a.startupFailure("i18n", fmt.Errorf("initialize i18n: %w", err))
+	}
+	if err := storage.AutoMigrate(a.db); err != nil {
+		return a.startupFailure("migration", err)
+	}
+	logrus.WithField("event", "startup.database_migrate").Info("database migration completed")
+	if err := a.startupBootstrap.EnsureInitialState(context.Background()); err != nil {
+		return a.startupFailure("bootstrap", fmt.Errorf("bootstrap initial state: %w", err))
+	}
+	logrus.WithField("event", "startup.bootstrap_complete").Info("initial control state ensured")
+	if err := a.runtimeState.Load(context.Background()); err != nil {
+		return a.startupFailure("runtime_state", fmt.Errorf("load runtime state: %w", err))
+	}
+	logrus.WithField("event", "startup.runtime_state_loaded").Info("runtime state loaded")
+	if a.startupRecovery != nil {
+		if err := a.startupRecovery.DrainCommittedOperations(context.Background()); err != nil {
+			return a.startupFailure("recovery", fmt.Errorf("recover committed control operations: %w", err))
 		}
-		// 数据修复
-		db.MigrateDatabase(a.db)
-		logrus.Info("Database auto-migration completed.")
-
-		// 初始化系统设置
-		if err := a.settingsManager.EnsureSettingsInitialized(a.configManager.GetAuthConfig()); err != nil {
-			return fmt.Errorf("failed to initialize system settings: %w", err)
+		logrus.WithField("event", "startup.operation_recovery").Info("committed control operations recovered")
+	}
+	if a.runtimeCheckpoint != nil {
+		if err := a.runtimeCheckpoint.Restore(context.Background()); err != nil {
+			logrus.WithError(err).WithField("event", "startup.checkpoint_restore").Warn(
+				"runtime state checkpoint restore failed; continuing with database-backed state",
+			)
+		} else {
+			logrus.WithField("event", "startup.checkpoint_restore").Info("runtime state checkpoint checked")
 		}
-		logrus.Info("System settings initialized in DB.")
-
-		a.settingsManager.Initialize(a.storage, a.groupManager, a.configManager.IsMaster())
-
-		// 从数据库加载密钥到 Redis
-		if err := a.keyPoolProvider.LoadKeysFromDB(); err != nil {
-			return fmt.Errorf("failed to load keys into key pool: %w", err)
+	}
+	if a.executionRuntime != nil {
+		if err := a.executionRuntime.Start(context.Background()); err != nil {
+			return a.startupFailure("execution_runtime", fmt.Errorf("start execution runtime: %w", err))
 		}
-		logrus.Debug("API keys loaded into Redis cache by master.")
-
-		// 仅 Master 节点启动的服务
-		a.requestLogService.Start()
-		a.logCleanupService.Start()
-		a.cronChecker.Start()
-	} else {
-		logrus.Info("Starting as Slave Node.")
-		a.settingsManager.Initialize(a.storage, a.groupManager, a.configManager.IsMaster())
+		logrus.WithField("event", "startup.execution_runtime_start").Info("execution runtime started")
 	}
 
-	// 显示配置并启动所有后台服务
-	a.configManager.DisplayServerConfig()
-
-	a.groupManager.Initialize()
-
-	// Create HTTP server
-	serverConfig := a.configManager.GetEffectiveServerConfig()
-	a.httpServer = &http.Server{
-		Addr:           fmt.Sprintf("%s:%d", serverConfig.Host, serverConfig.Port),
-		Handler:        a.engine,
-		ReadTimeout:    time.Duration(serverConfig.ReadTimeout) * time.Second,
-		WriteTimeout:   time.Duration(serverConfig.WriteTimeout) * time.Second,
-		IdleTimeout:    time.Duration(serverConfig.IdleTimeout) * time.Second,
-		MaxHeaderBytes: 1 << 20,
+	address := net.JoinHostPort(a.config.Server.Host, strconv.Itoa(a.config.Server.Port))
+	listener, err := a.listen("tcp", address)
+	if err != nil {
+		return a.startupFailure("listen", fmt.Errorf("listen on %s: %w", address, err))
 	}
+	logrus.WithFields(logrus.Fields{
+		"event":   "startup.server_listen",
+		"address": listener.Addr().String(),
+	}).Info("HTTP listener bound")
+	if a.requestLogs == nil {
+		closeErr := listener.Close()
+		return a.startupFailure("request_logs", errors.Join(
+			fmt.Errorf("start request logs: request log runtime is nil"),
+			wrapListenerCloseError(closeErr),
+		))
+	}
+	if err := a.requestLogs.Start(); err != nil {
+		closeErr := listener.Close()
+		return a.startupFailure("request_logs", errors.Join(
+			fmt.Errorf("start request logs: %w", err),
+			wrapListenerCloseError(closeErr),
+		))
+	}
+	logrus.WithField("event", "startup.request_log_start").Info("request log runtime started")
 
-	// Start HTTP server in a new goroutine
+	server := &http.Server{
+		Addr:              address,
+		Handler:           a.engine,
+		ReadTimeout:       time.Duration(a.config.Server.ReadTimeout) * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       time.Duration(a.config.Server.IdleTimeout) * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	a.httpServer = server
+	a.listener = listener
+	runtimeContext, cancelRuntime := context.WithCancel(context.Background())
+	runtimeDone := make(chan struct{})
+	a.runtimeCancel = cancelRuntime
+	a.runtimeDone = runtimeDone
+
 	go func() {
-		logrus.Infof("GPT-Load proxy server started successfully on Version: %s", version.Version)
-		logrus.Infof("Server address: http://%s:%d", serverConfig.Host, serverConfig.Port)
-		logrus.Info("")
-		if err := a.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.Fatalf("Server startup failed: %v", err)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			a.serveErrors <- fmt.Errorf("serve HTTP: %w", err)
 		}
 	}()
+	go func() {
+		defer close(runtimeDone)
+		logrus.WithField("event", "startup.control_runtime_start").Info("control runtime started")
+		a.controlRuntime.Run(runtimeContext)
+	}()
 
+	logrus.WithFields(logrus.Fields{
+		"event":   "startup.ready",
+		"address": listener.Addr().String(),
+		"version": version.Version,
+	}).Info("GPT-Load 2.0 server started")
 	return nil
 }
 
-// Stop gracefully shuts down the application.
-func (a *App) Stop(ctx context.Context) {
-	logrus.Info("Shutting down server...")
+// ServeErrors reports an unexpected terminal error from the HTTP accept loop.
+func (a *App) ServeErrors() <-chan error {
+	return a.serveErrors
+}
 
-	serverConfig := a.configManager.GetEffectiveServerConfig()
-	totalTimeout := time.Duration(serverConfig.GracefulShutdownTimeout) * time.Second
+// Address returns the bound listener address after Start succeeds.
+func (a *App) Address() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.listener == nil {
+		return ""
+	}
+	return a.listener.Addr().String()
+}
 
-	// 动态计算 HTTP 关机超时时间，为后台服务固定预留 5 秒
-	httpShutdownTimeout := totalTimeout - 5*time.Second
-	httpShutdownCtx, cancelHttpShutdown := context.WithTimeout(context.Background(), httpShutdownTimeout)
-	defer cancelHttpShutdown()
+// Stop cancels active work, drains local state, and closes infrastructure.
+func (a *App) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	logrus.Debugf("Attempting to gracefully shut down HTTP server (max %v)...", httpShutdownTimeout)
-	if err := a.httpServer.Shutdown(httpShutdownCtx); err != nil {
-		logrus.Debugf("HTTP server graceful shutdown timed out as expected, forcing remaining connections to close.")
-		if closeErr := a.httpServer.Close(); closeErr != nil {
-			logrus.Errorf("Error forcing HTTP server to close: %v", closeErr)
+	a.mu.Lock()
+	server := a.httpServer
+	listener := a.listener
+	cancelRuntime := a.runtimeCancel
+	runtimeDone := a.runtimeDone
+	requestLogs := a.requestLogs
+	executionRuntime := a.executionRuntime
+	liveSessions := a.liveSessions
+	runtimeCheckpoint := a.runtimeCheckpoint
+	lifecycle := a.lifecycle
+	a.mu.Unlock()
+
+	var errs []error
+	if lifecycle != nil {
+		lifecycle.BeginShutdown()
+		logrus.WithField("event", "shutdown.http_requests_cancel").Info("active HTTP requests canceled")
+	}
+	if cancelRuntime != nil {
+		cancelRuntime()
+	}
+	if liveSessions != nil {
+		liveSessions.CloseCodexLive()
+	}
+	var executionShutdownDone <-chan struct{}
+	if executionRuntime != nil {
+		executionShutdownDone = executionRuntime.BeginShutdown()
+	}
+	if server != nil {
+		if err := server.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("shut down HTTP server: %w", err))
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"event":   "shutdown.http_drain",
+				"outcome": "forced",
+			}).Warn("HTTP server graceful drain timed out")
+			if closeErr := server.Close(); closeErr != nil {
+				errs = append(errs, fmt.Errorf("force close HTTP server: %w", closeErr))
+			}
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"event":   "shutdown.http_drain",
+				"outcome": "graceful",
+			}).Info("HTTP server drain completed")
 		}
 	}
-	logrus.Info("HTTP server has been shut down.")
-
-	// 使用原始的总超时 context 继续关闭其他后台服务
-	stoppableServices := []func(context.Context){
-		a.groupManager.Stop,
-		a.settingsManager.Stop,
+	if listener != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, fmt.Errorf("close HTTP listener: %w", err))
+		}
+	}
+	if runtimeDone != nil {
+		select {
+		case <-runtimeDone:
+			logrus.WithField("event", "shutdown.control_runtime_stop").Info("control runtime drain completed")
+		case <-ctx.Done():
+			errs = append(errs, fmt.Errorf("wait for control runtime: %w", ctx.Err()))
+			logrus.WithError(ctx.Err()).WithFields(logrus.Fields{
+				"event":   "shutdown.control_runtime_stop",
+				"outcome": "forced",
+			}).Warn("control runtime did not drain before shutdown deadline")
+		}
+	}
+	if lifecycle != nil {
+		waitErr := lifecycle.Wait(ctx)
+		if waitErr != nil {
+			errs = append(errs, fmt.Errorf("wait for HTTP handlers: %w", waitErr))
+			logrus.WithError(waitErr).WithFields(logrus.Fields{
+				"event":   "shutdown.http_handlers_drained",
+				"outcome": "forced",
+			}).Warn("HTTP handlers did not drain before shutdown deadline")
+		}
+		if waitErr == nil {
+			logrus.WithField("event", "shutdown.http_handlers_drained").Info("HTTP handlers drained")
+		}
+	}
+	if runtimeCheckpoint != nil {
+		if err := runtimeCheckpoint.Save(context.Background()); err != nil {
+			logrus.WithError(err).WithField("event", "shutdown.checkpoint_save").Warn(
+				"runtime state checkpoint could not be saved; continuing shutdown",
+			)
+		} else {
+			logrus.WithField("event", "shutdown.checkpoint_save").Info("runtime state checkpoint saved")
+		}
+	}
+	if requestLogs != nil {
+		if err := requestLogs.Stop(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("stop request logs: %w", err))
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"event":   "shutdown.request_log_drain",
+				"outcome": "forced",
+			}).Warn("request log runtime did not drain cleanly")
+		} else {
+			logrus.WithField("event", "shutdown.request_log_drain").Info("request log runtime drained")
+		}
+	}
+	if executionShutdownDone != nil {
+		select {
+		case <-executionShutdownDone:
+			logrus.WithField("event", "shutdown.execution_runtime").Info("execution runtime stopped")
+		default:
+			logrus.WithFields(logrus.Fields{
+				"event":   "shutdown.execution_runtime",
+				"outcome": "detached",
+			}).Warn("execution runtime is still stopping; process exit will release remaining connections")
+		}
+	}
+	if a.db != nil {
+		sqlDB, err := a.db.DB()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("get database connection pool: %w", err))
+			logrus.WithError(err).WithField("event", "shutdown.database_close").Warn("database connection pool unavailable during shutdown")
+		} else if err := sqlDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close database: %w", err))
+			logrus.WithError(err).WithField("event", "shutdown.database_close").Warn("database close failed")
+		} else {
+			logrus.WithField("event", "shutdown.database_close").Info("database closed")
+		}
 	}
 
-	if serverConfig.IsMaster {
-		stoppableServices = append(stoppableServices,
-			a.cronChecker.Stop,
-			a.logCleanupService.Stop,
-			a.requestLogService.Stop,
-		)
+	err := errors.Join(errs...)
+	if err != nil {
+		logrus.WithError(err).WithField("event", "shutdown.failed").Error("application shutdown finished with errors")
+	} else {
+		logrus.WithField("event", "shutdown.complete").Info("application shutdown completed")
 	}
+	return err
+}
 
-	var wg sync.WaitGroup
-	wg.Add(len(stoppableServices))
+func (a *App) startupFailure(stage string, err error) error {
+	logrus.WithFields(logrus.Fields{
+		"event": "startup.failed",
+		"stage": stage,
+	}).WithError(err).Error("application startup failed")
+	return err
+}
 
-	for _, stopFunc := range stoppableServices {
-		go func(stop func(context.Context)) {
-			defer wg.Done()
-			stop(ctx)
-		}(stopFunc)
+func wrapListenerCloseError(err error) error {
+	if err == nil {
+		return nil
 	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		logrus.Info("All background services stopped.")
-	case <-ctx.Done():
-		logrus.Warn("Shutdown timed out, some services may not have stopped gracefully.")
-	}
-
-	if a.storage != nil {
-		a.storage.Close()
-	}
-
-	logrus.Info("Server exited gracefully")
+	return fmt.Errorf("close listener after request log startup failure: %w", err)
 }
